@@ -4,7 +4,7 @@ plugins {
     id("com.android.application")
 }
 
-val natives by configurations.creating
+val natives = configurations.create("natives")
 
 android {
     namespace = "org.walkure.android"
@@ -24,7 +24,7 @@ android {
 
     sourceSets {
         named("main") {
-            jniLibs.srcDir("libs")
+            jniLibs.directories.add("libs")
         }
     }
 
@@ -51,15 +51,15 @@ dependencies {
     implementation("com.badlogicgames.gdx:gdx-freetype:$gdxVersion")
 
     // Native binaries for all Android architectures
-    natives("com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-arm64-v8a")
-    natives("com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-armeabi-v7a")
-    natives("com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-x86_64")
-    natives("com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-x86")
+    add(natives.name, "com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-arm64-v8a")
+    add(natives.name, "com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-armeabi-v7a")
+    add(natives.name, "com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-x86_64")
+    add(natives.name, "com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-x86")
 
-    natives("com.badlogicgames.gdx:gdx-freetype-platform:$gdxVersion:natives-arm64-v8a")
-    natives("com.badlogicgames.gdx:gdx-freetype-platform:$gdxVersion:natives-armeabi-v7a")
-    natives("com.badlogicgames.gdx:gdx-freetype-platform:$gdxVersion:natives-x86_64")
-    natives("com.badlogicgames.gdx:gdx-freetype-platform:$gdxVersion:natives-x86")
+    add(natives.name, "com.badlogicgames.gdx:gdx-freetype-platform:$gdxVersion:natives-arm64-v8a")
+    add(natives.name, "com.badlogicgames.gdx:gdx-freetype-platform:$gdxVersion:natives-armeabi-v7a")
+    add(natives.name, "com.badlogicgames.gdx:gdx-freetype-platform:$gdxVersion:natives-x86_64")
+    add(natives.name, "com.badlogicgames.gdx:gdx-freetype-platform:$gdxVersion:natives-x86")
 }
 
 // Unpack LibGDX native shared libraries (.so) into libs/
