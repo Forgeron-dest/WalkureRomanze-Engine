@@ -95,7 +95,7 @@ On Windows, use `.\gradlew.bat packageAll`. Outputs are written to `build/dist/`
 - `walkure-romanze-linux` and `walkure-linux.sh` — Linux launchers.
 - `walkure-windows.bat` and `walkure-windows-jpackage.args` — Java-based Windows launcher and configuration for creating a Windows app image.
 
-The JAR and `.bat` launcher require Java 21+ on `PATH`. A `jpackage` app image includes its own runtime. `packageAll` does not create a native Windows app image on Linux. To create one on Windows, run `jpackage @walkure-windows-jpackage.args` from `build/dist` using a JDK. The generated launchers need to be run alongside the user's game installation.
+The JAR and `.bat` launcher require Java 21+ on `PATH`. A `jpackage` app image includes its own runtime. `packageAll` does not create a native Windows app image on Linux. To create one on Windows, run `jpackage @walkure-windows-jpackage.args` from `build/dist` using a JDK. The generated launchers need to be run alongside the user's game installation. GitHub releases include a Windows app-image ZIP created on a Windows runner; launch it with `WalkureRomanze.exe`.
 
 ### GitHub releases and versioning
 
@@ -110,9 +110,9 @@ Merging a pull request into `main` automatically publishes a desktop release acc
 
 If there is no previous stable version tag, the baseline is `v0.1.0`; the first qualifying merge increments from it. For example, the first `fix/` merge publishes `v0.1.1`, while the first `feat/` merge publishes `v0.2.0`. Version tags use a `vMAJOR.MINOR.PATCH` format. A manually published GitHub Release also builds and attaches the desktop archives; drafts do not trigger that build.
 
-The workflow builds the merged commit, creates the release and uploads versioned Linux and Windows-launcher archives. It reuses a tag already created for the same merge commit if a run is retried. If two releases collide on the same next version, the later job fails rather than overwriting another commit's release; rerun it to calculate the next version. The release tag is the user-facing version; the Gradle module versions are separate and are not changed by the workflow.
+The workflow builds the merged commit on Linux and Windows, then creates the release and uploads a Linux archive and a self-contained Windows app-image ZIP. It reuses a tag already created for the same merge commit if a run is retried. If two releases collide on the same next version, the later job fails rather than overwriting another commit's release; rerun it to calculate the next version. The release tag is the user-facing version; the Gradle module versions are separate and are not changed by the workflow.
 
-Release archives contain the engine and launchers, **not** game files. Players must provide their own game installation. The Windows archive is a Java-based launcher bundle, not a prebuilt Windows app image. Android packages are not currently published by the release workflow.
+Release archives contain the engine and launchers, **not** game files. Players must provide their own game installation. The Windows app image includes its own Java runtime and executable, but is not an installer. Android packages are not currently published by the release workflow.
 
 ### Android APK
 

@@ -11,11 +11,15 @@ permissions:
   contents: write
 
 jobs:
-  package:
-    name: Package Linux and Windows launchers
+  version:
+    name: Select release version
     if: github.event_name == 'release' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+      tag: ${{ steps.version.outputs.tag }}
+      source_ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.pull_request.merge_commit_sha }}
+      merge_sha: ${{ github.event.pull_request.merge_commit_sha }}
     steps:
       - name: Check out release source
         uses: actions/checkout@v7
@@ -111,8 +115,19 @@ jobs:
           printf 'publish=true\n' >> "$GITHUB_OUTPUT"
           printf 'tag=%s\n' "$next_tag" >> "$GITHUB_OUTPUT"
 
+  package-linux:
+    name: Package Linux archive
+    needs: version
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.source_ref }}
+
       - name: Set up Java 21
-        if: steps.version.outputs.publish == 'true'
         uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -120,45 +135,109 @@ jobs:
           cache: gradle
           problem-matcher: true
 
-      - name: Package desktop distributions
-        if: steps.version.outputs.publish == 'true'
-        run: ./gradlew --no-daemon packageAll
+      - name: Package Linux distribution
+        run: ./gradlew --no-daemon :desktop:packageLinux
 
-      - name: Create release archives
-        if: steps.version.outputs.publish == 'true'
+      - name: Create Linux release archive
         env:
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
         run: |
           set -eu
           dist=build/dist
-          linux_archive="$dist/walkure-romanze-${RELEASE_TAG}-linux.tar.gz"
-          windows_archive="$dist/walkure-romanze-${RELEASE_TAG}-windows-launcher.zip"
           test -s "$dist/walkure-romanze-desktop.jar"
           test -s "$dist/walkure-romanze-linux"
           test -s "$dist/walkure-linux.sh"
-          test -s "$dist/walkure-windows.bat"
-          test -s "$dist/walkure-windows-jpackage.args"
-
-          tar -czf "$linux_archive" \
+          tar -czf "$dist/walkure-romanze-${RELEASE_TAG}-linux.tar.gz" \
             -C "$dist" \
             walkure-romanze-desktop.jar \
             walkure-romanze-linux \
             walkure-linux.sh
-          zip -j "$windows_archive" \
-            "$dist/walkure-romanze-desktop.jar" \
-            "$dist/walkure-windows.bat" \
-            "$dist/walkure-windows-jpackage.args"
+
+      - name: Upload Linux release archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-release-asset
+          path: build/dist/walkure-romanze-${{ needs.version.outputs.tag }}-linux.tar.gz
+          if-no-files-found: error
+
+  package-windows:
+    name: Package Windows app image
+    needs: version
+    if: needs.version.outputs.publish == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.source_ref }}
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+          problem-matcher: true
+
+      - name: Package Windows distribution
+        run: .\gradlew.bat --no-daemon :desktop:packageWindows
+
+      - name: Create Windows app image
+        working-directory: build/dist
+        run: jpackage "@walkure-windows-jpackage.args"
+
+      - name: Create Windows release archive
+        env:
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        working-directory: build/dist
+        run: |
+          if (-not (Test-Path 'WalkureRomanze/WalkureRomanze.exe')) {
+            throw 'jpackage did not create WalkureRomanze/WalkureRomanze.exe'
+          }
+          Compress-Archive -Path 'WalkureRomanze' -DestinationPath "walkure-romanze-$env:RELEASE_TAG-windows-app.zip" -CompressionLevel Optimal
+
+      - name: Upload Windows release archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-release-asset
+          path: build/dist/walkure-romanze-${{ needs.version.outputs.tag }}-windows-app.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish desktop release
+    needs: [version, package-linux, package-windows]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Download Linux release archive
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-release-asset
+          path: build/dist
+
+      - name: Download Windows release archive
+        uses: actions/download-artifact@v8
+        with:
+          name: windows-release-asset
+          path: build/dist
 
       - name: Create release and upload assets for merged pull request
-        if: github.event_name == 'pull_request' && steps.version.outputs.publish == 'true'
+        if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+          MERGE_SHA: ${{ needs.version.outputs.merge_sha }}
         run: |
           set -eu
           linux_archive="build/dist/walkure-romanze-${RELEASE_TAG}-linux.tar.gz"
-          windows_archive="build/dist/walkure-romanze-${RELEASE_TAG}-windows-launcher.zip"
+          windows_archive="build/dist/walkure-romanze-${RELEASE_TAG}-windows-app.zip"
 
           git fetch --tags origin
           if git rev-parse --verify --quiet "refs/tags/$RELEASE_TAG" >/dev/null; then
@@ -189,12 +268,12 @@ jobs:
           fi
 
       - name: Upload assets to manually published GitHub Release
-        if: github.event_name == 'release' && steps.version.outputs.publish == 'true'
+        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
         run: |
           gh release upload "$RELEASE_TAG" \
             "build/dist/walkure-romanze-${RELEASE_TAG}-linux.tar.gz" \
-            "build/dist/walkure-romanze-${RELEASE_TAG}-windows-launcher.zip" \
+            "build/dist/walkure-romanze-${RELEASE_TAG}-windows-app.zip" \
             --clobber
