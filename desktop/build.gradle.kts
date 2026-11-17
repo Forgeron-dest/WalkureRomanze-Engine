@@ -142,6 +142,10 @@ val packageWindows = tasks.register("packageWindows") {
         val distDir = rootProject.layout.buildDirectory.dir("dist").get().asFile
         distDir.mkdirs()
         val jvmFlags = modernJvmNativeArgs.joinToString(" ")
+        val fatJar = File(distDir, "walkure-romanze-desktop.jar")
+        val jpackageInputDir = File(distDir, "jpackage-input")
+        jpackageInputDir.mkdirs()
+        fatJar.copyTo(File(jpackageInputDir, fatJar.name), overwrite = true)
 
         val batFile = File(distDir, "walkure-windows.bat")
         batFile.writeText(
@@ -158,7 +162,7 @@ val packageWindows = tasks.register("packageWindows") {
             """
             --type app-image
             --name WalkureRomanze
-            --input .
+            --input jpackage-input
             --main-jar walkure-romanze-desktop.jar
             --main-class walkure.MainKt
             --java-options -Xmx2048m

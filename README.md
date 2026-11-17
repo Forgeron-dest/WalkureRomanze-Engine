@@ -93,7 +93,7 @@ On Windows, use `.\gradlew.bat packageAll`. Outputs are written to `build/dist/`
 
 - `walkure-romanze-desktop.jar` — cross-platform fat JAR.
 - `walkure-romanze-linux` and `walkure-linux.sh` — Linux launchers.
-- `walkure-windows.bat` and `walkure-windows-jpackage.args` — Java-based Windows launcher and configuration for creating a Windows app image.
+- `walkure-windows.bat`, `jpackage-input/`, and `walkure-windows-jpackage.args` — Java-based Windows launcher, staged JAR, and configuration for creating a Windows app image.
 
 The JAR and `.bat` launcher require Java 21+ on `PATH`. A `jpackage` app image includes its own runtime. `packageAll` does not create a native Windows app image on Linux. To create one on Windows, run `jpackage @walkure-windows-jpackage.args` from `build/dist` using a JDK. The generated launchers need to be run alongside the user's game installation. GitHub releases include a Windows app-image ZIP created on a Windows runner; launch it with `WalkureRomanze.exe`.
 
