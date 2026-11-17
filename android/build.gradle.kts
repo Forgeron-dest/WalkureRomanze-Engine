@@ -41,7 +41,7 @@ android {
     }
 }
 
-val gdxVersion = "1.13.1"
+val gdxVersion = "1.14.2"
 
 dependencies {
     implementation(project(":core"))
