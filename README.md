@@ -86,6 +86,14 @@ The standalone desktop JAR and `walkure-windows.bat` require a Java 21+ runtime 
 
 **Windows has not been tested.** The application, Windows desktop packaging, Android builds, and Windows batch scripts are unverified on Windows; the commands below are provided as guidance.
 
+### Developer formatting hook
+
+The build checks Kotlin formatting with Spotless. To enable the local pre-commit hook in a clone, run once:
+```bash
+git config core.hooksPath .githooks
+```
+The hook runs `spotlessApply` for Kotlin changes being committed and stages the formatted versions. If a staged Kotlin file also has unstaged edits, stage or stash those edits before committing. Git for Windows includes the shell needed to run the hook; WSL is not required.
+
 ### 1. Run the Game (Starts at Title Screen)
 ```bash
 ./gradlew :run --args="play --honorifics HON"

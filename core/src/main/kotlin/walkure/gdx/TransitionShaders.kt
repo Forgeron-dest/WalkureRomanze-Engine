@@ -4,12 +4,13 @@ import com.badlogic.gdx.Gdx
 import com.badlogic.gdx.graphics.glutils.ShaderProgram
 
 /**
- * GLSL Shader for authentic QLiE rule-based grayscale mask wipe transitions (`フェード\*.bmp` and `フェード\*.b`).
- * Evaluates `maskVal < progress` with a smooth threshold band to recreate smooth fades, character silhouettes,
- * curtains, wind wipes, and diagonals.
+ * GLSL Shader for authentic QLiE rule-based grayscale mask wipe transitions (`フェード\*.bmp` and
+ * `フェード\*.b`). Evaluates `maskVal < progress` with a smooth threshold band to recreate smooth
+ * fades, character silhouettes, curtains, wind wipes, and diagonals.
  */
 object TransitionShaders {
-    private const val VERTEX_SHADER = """
+  private const val VERTEX_SHADER =
+    """
 attribute vec4 a_position;
 attribute vec4 a_color;
 attribute vec2 a_texCoord0;
@@ -24,7 +25,8 @@ void main() {
 }
 """
 
-    private const val RULE_WIPE_FRAGMENT_SHADER = """
+  private const val RULE_WIPE_FRAGMENT_SHADER =
+    """
 #ifdef GL_ES
 precision mediump float;
 #endif
@@ -52,7 +54,8 @@ void main() {
 }
 """
 
-    private const val MOSAIC_TRANSITION_FRAGMENT_SHADER = """
+  private const val MOSAIC_TRANSITION_FRAGMENT_SHADER =
+    """
 #ifdef GL_ES
 precision mediump float;
 #endif
@@ -78,23 +81,23 @@ void main() {
 }
 """
 
-    fun createRuleWipeShader(): ShaderProgram? {
-        val shader = ShaderProgram(VERTEX_SHADER, RULE_WIPE_FRAGMENT_SHADER)
-        if (!shader.isCompiled) {
-            Gdx.app.error("TransitionShaders", "RuleWipe shader compilation failed:\n" + shader.log)
-            shader.dispose()
-            return null
-        }
-        return shader
+  fun createRuleWipeShader(): ShaderProgram? {
+    val shader = ShaderProgram(VERTEX_SHADER, RULE_WIPE_FRAGMENT_SHADER)
+    if (!shader.isCompiled) {
+      Gdx.app.error("TransitionShaders", "RuleWipe shader compilation failed:\n" + shader.log)
+      shader.dispose()
+      return null
     }
+    return shader
+  }
 
-    fun createMosaicTransitionShader(): ShaderProgram? {
-        val shader = ShaderProgram(VERTEX_SHADER, MOSAIC_TRANSITION_FRAGMENT_SHADER)
-        if (!shader.isCompiled) {
-            Gdx.app.error("TransitionShaders", "Mosaic shader compilation failed:\n" + shader.log)
-            shader.dispose()
-            return null
-        }
-        return shader
+  fun createMosaicTransitionShader(): ShaderProgram? {
+    val shader = ShaderProgram(VERTEX_SHADER, MOSAIC_TRANSITION_FRAGMENT_SHADER)
+    if (!shader.isCompiled) {
+      Gdx.app.error("TransitionShaders", "Mosaic shader compilation failed:\n" + shader.log)
+      shader.dispose()
+      return null
     }
+    return shader
+  }
 }

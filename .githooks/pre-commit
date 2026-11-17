@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+staged_kotlin=$(mktemp)
+trap 'rm -f "$staged_kotlin"' EXIT HUP INT TERM
+
+git diff --cached --name-only --diff-filter=ACMR -- '*.kt' > "$staged_kotlin"
+if [ ! -s "$staged_kotlin" ]; then
+    exit 0
+fi
+
+while IFS= read -r file; do
+    if ! git diff --quiet -- "$file"; then
+        printf 'Pre-commit: %s has unstaged edits; stage or stash them before formatting.\n' "$file" >&2
+        exit 1
+    fi
+done < "$staged_kotlin"
+
+./gradlew spotlessApply
+
+while IFS= read -r file; do
+    git add -- "$file"
+done < "$staged_kotlin"
