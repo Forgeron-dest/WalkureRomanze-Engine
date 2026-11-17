@@ -15,9 +15,18 @@ cd walkure-kotlin
 bash scripts/restore-game-assets.sh
 ```
 
-The script uses the local `GameData`, game executable/DLL, and `WalkureCustomV4.ttf` when available. It writes ignored files under `android/src/main/assets/` and restores the launcher icon from Mio's local game portrait; it does not add game assets to Git. If `walkure.keys` does not already exist, it generates that file from the local game installation. Installing `ffmpeg` also lets the script extract and convert the startup logo video from the game archive.
+On Windows, use PowerShell:
 
-On Windows, run `.\scripts\restore-game-assets.bat` from Command Prompt or PowerShell instead; Git Bash and WSL are not required.
+```powershell
+Set-Location 'C:\path\to\Walkure Romanze'
+git clone https://github.com/Forgeron-dest/WalkureRomanze-Engine.git walkure-kotlin
+Set-Location .\walkure-kotlin
+.\scripts\restore-game-assets.bat
+```
+
+The script uses the local `GameData`, game executable/DLL, and `WalkureCustomV4.ttf` when available. It writes ignored files under `android/src/main/assets/` and restores the launcher icon from Mio's local game portrait; it does not add game assets to Git. If `walkure.keys` does not already exist, it generates it from the local executable and DLL. The game archives and a valid key are required to play; the custom font and logo are optional. Installing `ffmpeg` lets the script extract and convert the startup logo video from the game archive.
+
+The Windows batch script performs the same local restoration; Git Bash and WSL are not required.
 
 ---
 
@@ -64,21 +73,44 @@ On Windows, run `.\scripts\restore-game-assets.bat` from Command Prompt or Power
 
 ## Building, Running & Multi-Platform Packaging
 
-Building locally requires a JDK and internet access for Gradle dependencies. Android builds also need Android SDK platform 36 and build-tools 36.0.0; the headless setup scripts install these packages.
+### Build dependencies
+
+- **Git** is needed to clone the repository.
+- **JDK 21** is required for the project toolchain. The Gradle wrapper downloads Gradle 9.6.1; its configured **JDK 25 daemon may be downloaded on first run**. The SDK setup scripts do not install Java.
+- **Internet access** is needed for Gradle, dependencies, the configured daemon JDK, and any Android SDK packages not already installed.
+- **Android builds only:** Android SDK `platform-tools`, `platforms;android-36`, and `build-tools;36.0.0`. The headless setup scripts install these and Gradle generates the ignored `android/libs` native libraries during the build.
+- **To play the game:** use your own game installation, including `GameData/data*.pack` and a valid `GameData/walkure.keys`. Asset restoration can generate the key when the local executable and DLL are available. The custom font and startup logo are optional.
+- **Optional:** `ffmpeg` for extracting/converting the startup logo and transcoding movies; ADB (included in Android `platform-tools`) and USB debugging for the one-click phone transfer.
+
+The standalone desktop JAR and `walkure-windows.bat` require a Java 21+ runtime on `PATH`; the `jpackage` app image bundles its own runtime.
+
+**Windows has not been tested.** The application, Windows desktop packaging, Android builds, and Windows batch scripts are unverified on Windows; the commands below are provided as guidance.
 
 ### 1. Run the Game (Starts at Title Screen)
 ```bash
 ./gradlew :run --args="play --honorifics HON"
 ```
+On Windows, run from the cloned repository:
+```powershell
+.\gradlew.bat :run --args="play --honorifics HON"
+```
 To jump directly into a specific scenario script (e.g. `sue_001_00.s`):
 ```bash
 ./gradlew :run --args="play --script sue_001_00.s --honorifics HON"
 ```
+On Windows:
+```powershell
+.\gradlew.bat :run --args="play --script sue_001_00.s --honorifics HON"
+```
 
 ### 2. Export Portable 512-Byte Key File (`GameData/walkure.keys`)
-Generates `GameData/walkure.keys` (`512 bytes`) so Linux, macOS, and Android `.apk` builds can decrypt `data0.pack`..`data9.pack` without `WALKURE_ROMANZE.exe` or `DLL/key.fkey`:
+Generates `GameData/walkure.keys` (`512 bytes`) so builds can decrypt `data0.pack`..`data9.pack` without requiring `WALKURE_ROMANZE.exe` or `DLL/key.fkey` at runtime:
 ```bash
 ./gradlew :run --args="export-keys"
+```
+On Windows, use:
+```powershell
+.\gradlew.bat :run --args="export-keys"
 ```
 When the repository is cloned inside the game folder, `bash scripts/restore-game-assets.sh` (Linux/macOS) or `.\scripts\restore-game-assets.bat` (Windows) generates the key file and restores ignored Android assets for the local build.
 
@@ -86,20 +118,34 @@ When the repository is cloned inside the game folder, `bash scripts/restore-game
 ```bash
 ./gradlew packageAll
 ```
+On Windows, run:
+```powershell
+.\gradlew.bat packageAll
+```
 Produces in `walkure-kotlin/build/dist/`:
 - `walkure-romanze-linux`: Self-executing Linux binary (`./walkure-romanze-linux`)
 - `walkure-romanze-desktop.jar`: Cross-platform standalone fat JAR
 - `walkure-linux.sh`: POSIX shell launcher
 - `walkure-windows.bat` & `walkure-windows-jpackage.args`: Windows launcher and `jpackage` config for building a native Windows `.exe` (`jpackage @walkure-windows-jpackage.args`)
 
-For the native Windows app image, run `jpackage @walkure-windows-jpackage.args` from `build/dist` on Windows with a JDK installed. `packageAll` creates the shared JAR and launchers but does not create a Windows app image when run on Linux.
+For the native Windows app image, run `jpackage @walkure-windows-jpackage.args` from `build/dist` in Command Prompt on Windows with a JDK installed. In PowerShell, use:
+```powershell
+Set-Location .\build\dist
+jpackage '@walkure-windows-jpackage.args'
+```
+`packageAll` creates the shared JAR and launchers but does not create a Windows app image when run on Linux. Run the generated launcher from `build/dist` or from the cloned repository so it can find the neighboring game installation.
 
 ### 4. Build Android `.apk` (`build/dist/walkure-romanze.apk`)
 ```bash
 ./gradlew buildApk
 ```
+On Windows, run:
+```powershell
+.\gradlew.bat buildApk
+```
 Produces `build/dist/walkure-romanze.apk` (7.3 MB) with:
 - Native `.so` libraries for ARM64, ARMv7, x86_64, and x86
+- Gradle downloads dependencies and generates the ignored Android native libraries automatically; no manual `android/libs` setup is needed
 - Automatically bundles local `walkure.keys` and `WalkureCustomV4.ttf` when available
 - Dynamic storage auto-detection and folder picker (SAF) for your `data*.pack` files.
 - Local Android builds with an existing SDK or the minimal headless setup scripts (`scripts/setup-android-sdk.sh` / `.bat`), without downloading Android Studio.

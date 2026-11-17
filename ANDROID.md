@@ -2,6 +2,18 @@
 
 This guide explains how to compile the **Walkure Romanze** Android `.apk` and run the game on any Android phone or tablet (Android 7.0+ / API 24 to Android 15+ / API 36+), **without needing Android Studio or the heavy Android developer suite**.
 
+### Prerequisites
+
+- Git to clone the repository.
+- JDK 21 for the project toolchain. The wrapper downloads Gradle 9.6.1; its configured JDK 25 daemon may be downloaded on the first Gradle run. The SDK setup scripts do not install Java.
+- Internet access for Gradle, dependencies, the daemon JDK, and Android SDK packages.
+- Android SDK `platform-tools`, `platforms;android-36`, and `build-tools;36.0.0`. The setup scripts install these packages; Gradle generates the ignored native libraries automatically.
+- Your own game installation to play: `GameData/data*.pack` and a valid `GameData/walkure.keys`. The restore script can generate the key from the local executable and DLL. The custom font and startup logo are optional.
+
+Optional tools: `ffmpeg` extracts/converts the startup logo and transcodes OGV cutscenes; ADB (included in `platform-tools`) is only needed for USB transfer. On Linux/macOS, the headless SDK setup also needs `curl` or `wget` and `unzip`; the Windows script uses built-in PowerShell.
+
+**Windows has not been tested:** the APK build and Windows batch scripts are unverified there.
+
 ---
 
 ## 🚀 2 Ways to Build the `.apk`
@@ -55,12 +67,19 @@ Clone this repository into a subfolder of your own game installation folder, the
 
 ```bash
 cd "/path/to/Walkure Romanze"
-git clone <repository-url> walkure-kotlin
+git clone https://github.com/Forgeron-dest/WalkureRomanze-Engine.git walkure-kotlin
 cd walkure-kotlin
 bash scripts/restore-game-assets.sh
 ```
 
-On Windows, use Command Prompt or PowerShell and run `.\scripts\restore-game-assets.bat` from the cloned repository instead; neither Git Bash nor WSL is required.
+On Windows, use PowerShell:
+```powershell
+Set-Location 'C:\path\to\Walkure Romanze'
+git clone https://github.com/Forgeron-dest/WalkureRomanze-Engine.git walkure-kotlin
+Set-Location .\walkure-kotlin
+.\scripts\restore-game-assets.bat
+```
+Neither Git Bash nor WSL is required.
 
 The script generates `GameData/walkure.keys` from the local executable and DLL if needed, copies the key and custom font into ignored Android assets, and restores the launcher icon from Mio's game portrait in the local archive. If `ffmpeg` is installed, it also extracts and converts the startup logo. Missing optional font/logo assets do not prevent building.
 
@@ -71,6 +90,8 @@ When building locally after restoring assets, Gradle **automatically bundles**:
 - `ricotta_logo.mp4` (hardware-accelerated startup logo movie)
 
 into the APK's internal assets. Mobile users **never need the Windows `.exe` or Delphi DLLs** on their phone!
+
+Gradle downloads the declared dependencies and generates the ignored Android native libraries during the build; do not copy `android/libs` from another installation or commit it.
 
 ### 3. Copying Game Data (`data0.pack`..`data15.pack` & `movie/`) to Your Phone
 
@@ -99,9 +120,9 @@ If you have USB debugging enabled:
 ```bash
 bash scripts/push-game-data.sh
 ```
-This will automatically detect your phone and push `data0.pack`..`data15.pack` directly into the app's files directory over USB.
+This detects your phone and pushes the `data*.pack` archives, `walkure.keys` when available, and movie cutscenes to the app's files directory over USB. If `ffmpeg` is installed, it also creates MP4 versions of OGV cutscenes for Android.
 
-On Windows, run `.\scripts\push-game-data.bat` from Command Prompt or PowerShell.
+On Windows, run `.\scripts\push-game-data.bat` from Command Prompt or PowerShell; it looks for ADB on `PATH` or in common Android SDK locations.
 
 ---
 
