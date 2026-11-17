@@ -120,7 +120,7 @@ jobs:
     needs: version
     if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - name: Check out release source
         uses: actions/checkout@v7
@@ -159,13 +159,14 @@ jobs:
           name: linux-release-asset
           path: build/dist/walkure-romanze-${{ needs.version.outputs.tag }}-linux.tar.gz
           if-no-files-found: error
+          retention-days: 1
 
   package-windows:
     name: Package Windows app image
     needs: version
     if: needs.version.outputs.publish == 'true'
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - name: Check out release source
         uses: actions/checkout@v7
@@ -203,6 +204,7 @@ jobs:
           name: windows-release-asset
           path: build/dist/walkure-romanze-${{ needs.version.outputs.tag }}-windows-app.zip
           if-no-files-found: error
+          retention-days: 1
 
   publish:
     name: Publish desktop release
