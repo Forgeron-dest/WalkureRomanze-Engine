@@ -1,0 +1,200 @@
+name: Desktop release
+
+on:
+  pull_request:
+    branches: [main]
+    types: [closed]
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Package Linux and Windows launchers
+    if: github.event_name == 'release' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Select release version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          stable_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          release_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+
+          if [[ "$EVENT_NAME" == "release" ]]; then
+            if [[ ! "$RELEASE_TAG" =~ $release_tag_re ]]; then
+              echo "Release tag must use SemVer with a v prefix (for example v1.2.3)." >&2
+              exit 1
+            fi
+            printf 'publish=true\n' >> "$GITHUB_OUTPUT"
+            printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          case "$HEAD_BRANCH" in
+            fix/*|chore/*|renovate/*) bump=patch ;;
+            feat/*) bump=minor ;;
+            breaking/*) bump=major ;;
+            *)
+              echo "No release for branch '$HEAD_BRANCH' (unrecognized release prefix)."
+              printf 'publish=false\n' >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          existing_tag=
+          while IFS= read -r candidate; do
+            if [[ "$candidate" =~ $stable_tag_re ]]; then
+              existing_tag="$candidate"
+              break
+            fi
+          done < <(git tag --points-at "$MERGE_SHA" --list 'v[0-9]*' --sort=-version:refname)
+
+          if [[ -n "$existing_tag" ]]; then
+            next_tag="$existing_tag"
+            echo "Reusing $next_tag already attached to this merge commit."
+          else
+            latest_tag=
+            while IFS= read -r candidate; do
+              if [[ "$candidate" =~ $stable_tag_re ]]; then
+                latest_tag="$candidate"
+                break
+              fi
+            done < <(git tag --list 'v[0-9]*' --sort=-version:refname)
+
+            baseline="${latest_tag:-v0.1.0}"
+            if [[ "$baseline" =~ $stable_tag_re ]]; then
+              major="${BASH_REMATCH[1]}"
+              minor="${BASH_REMATCH[2]}"
+              patch="${BASH_REMATCH[3]}"
+            else
+              echo "Latest stable tag '$baseline' is not a valid vMAJOR.MINOR.PATCH tag." >&2
+              exit 1
+            fi
+
+            case "$bump" in
+              major)
+                major=$((major + 1))
+                minor=0
+                patch=0
+                ;;
+              minor)
+                minor=$((minor + 1))
+                patch=0
+                ;;
+              patch)
+                patch=$((patch + 1))
+                ;;
+            esac
+            next_tag="v${major}.${minor}.${patch}"
+
+            if git rev-parse --verify --quiet "refs/tags/$next_tag" >/dev/null; then
+              echo "Tag $next_tag already exists but does not point to this merge commit." >&2
+              exit 1
+            fi
+          fi
+
+          printf 'publish=true\n' >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$next_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java 21
+        if: steps.version.outputs.publish == 'true'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+          problem-matcher: true
+
+      - name: Package desktop distributions
+        if: steps.version.outputs.publish == 'true'
+        run: ./gradlew --no-daemon packageAll
+
+      - name: Create release archives
+        if: steps.version.outputs.publish == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -eu
+          dist=build/dist
+          linux_archive="$dist/walkure-romanze-${RELEASE_TAG}-linux.tar.gz"
+          windows_archive="$dist/walkure-romanze-${RELEASE_TAG}-windows-launcher.zip"
+          test -s "$dist/walkure-romanze-desktop.jar"
+          test -s "$dist/walkure-romanze-linux"
+          test -s "$dist/walkure-linux.sh"
+          test -s "$dist/walkure-windows.bat"
+          test -s "$dist/walkure-windows-jpackage.args"
+
+          tar -czf "$linux_archive" \
+            -C "$dist" \
+            walkure-romanze-desktop.jar \
+            walkure-romanze-linux \
+            walkure-linux.sh
+          zip -j "$windows_archive" \
+            "$dist/walkure-romanze-desktop.jar" \
+            "$dist/walkure-windows.bat" \
+            "$dist/walkure-windows-jpackage.args"
+
+      - name: Create release and upload assets for merged pull request
+        if: github.event_name == 'pull_request' && steps.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -eu
+          linux_archive="build/dist/walkure-romanze-${RELEASE_TAG}-linux.tar.gz"
+          windows_archive="build/dist/walkure-romanze-${RELEASE_TAG}-windows-launcher.zip"
+
+          git fetch --tags origin
+          if git rev-parse --verify --quiet "refs/tags/$RELEASE_TAG" >/dev/null; then
+            tagged_commit=$(git rev-parse "${RELEASE_TAG}^{commit}")
+            if [ "$tagged_commit" != "$MERGE_SHA" ]; then
+              echo "Release tag $RELEASE_TAG was claimed by another merge. Re-run this job to calculate the next version." >&2
+              exit 1
+            fi
+          elif ! git push origin "$MERGE_SHA:refs/tags/$RELEASE_TAG"; then
+            git fetch --tags origin
+            if git rev-parse --verify --quiet "refs/tags/$RELEASE_TAG" >/dev/null; then
+              tagged_commit=$(git rev-parse "${RELEASE_TAG}^{commit}")
+              if [ "$tagged_commit" != "$MERGE_SHA" ]; then
+                echo "Release tag $RELEASE_TAG was claimed by another merge. Re-run this job to calculate the next version." >&2
+              fi
+            fi
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$linux_archive" "$windows_archive" --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              --target "$MERGE_SHA" \
+              --title "$RELEASE_TAG" \
+              --generate-notes
+            gh release upload "$RELEASE_TAG" "$linux_archive" "$windows_archive"
+          fi
+
+      - name: Upload assets to manually published GitHub Release
+        if: github.event_name == 'release' && steps.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            "build/dist/walkure-romanze-${RELEASE_TAG}-linux.tar.gz" \
+            "build/dist/walkure-romanze-${RELEASE_TAG}-windows-launcher.zip" \
+            --clobber
