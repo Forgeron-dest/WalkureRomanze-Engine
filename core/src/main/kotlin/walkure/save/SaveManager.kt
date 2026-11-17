@@ -181,9 +181,9 @@ class SaveManager(val gameDir: File) {
     }
     val useNativeProps =
       nativeParsed?.kotlinProps != null &&
-        (!sysFile.exists() || (candidateSysDat?.lastModified() ?: 0L) > sysFile.lastModified())
+        (!sysFile.exists() || candidateSysDat.lastModified() > sysFile.lastModified())
     if (useNativeProps) {
-      nativeParsed!!.kotlinProps!!.stringPropertyNames().forEach { k ->
+      nativeParsed.kotlinProps.stringPropertyNames().forEach { k ->
         props.setProperty(k, nativeParsed.kotlinProps.getProperty(k))
       }
     }

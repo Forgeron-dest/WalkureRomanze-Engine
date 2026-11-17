@@ -555,7 +555,7 @@ class ScenarioVm(
       } else {
         overlaySlots[slotIdx] = resolved
         if (slotIdx == 1) {
-          aliasResolver?.resolveBgLocate(resolved)?.let { sceneBgLocate = it }
+          aliasResolver.resolveBgLocate(resolved)?.let { sceneBgLocate = it }
         }
       }
     }
