@@ -10,7 +10,7 @@ repositories {
     mavenCentral()
 }
 
-val gdxVersion = "1.13.1"
+val gdxVersion = "1.14.2"
 val ktxVersion = "1.13.1-rc1"
 
 dependencies {
