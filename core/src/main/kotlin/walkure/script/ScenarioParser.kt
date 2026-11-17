@@ -213,6 +213,9 @@ class AssetAliasResolver(private val vfs: QlieVirtualFileSystem) {
   private val faceCostumeAliases = HashMap<String, String>()
   private val bgLocationMap = HashMap<String, String>()
   private val spriteAdjustXMap = HashMap<String, Int>()
+  private val fadeAliases = HashMap<String, String>()
+  private val fadeDefaultTimesMs = HashMap<String, Float>()
+  private val fadeStrengths = HashMap<String, Int>()
 
   private val charSpritesByCode: Map<String, List<walkure.pack.QliePackEntry>>
   private val faceSpritesByCode: Map<String, List<walkure.pack.QliePackEntry>>
@@ -239,6 +242,20 @@ class AssetAliasResolver(private val vfs: QlieVirtualFileSystem) {
     }
     loadKeyValueTable("ライブラリ\\avgシステム\\リスト\\立ち絵位置調整リスト.txt") { k, v ->
       v.toIntOrNull()?.let { spriteAdjustXMap[k.lowercase()] = it }
+    }
+    // フェードエイリアス.txt maps a script-facing fade identifier (usually a numeric code such as
+    // `2`) onto a rule asset name (`scroll`). Values are kept verbatim because they are used as
+    // `フェード\` filenames; blank values (`31=`, `36=`) are stored so `resolveFadeAlias` can apply
+    // QLiE's identity fallback rather than dropping the key.
+    loadKeyValueTable("ライブラリ\\avgシステム\\リスト\\フェードエイリアス.txt") { k, v ->
+      fadeAliases[k] = v
+      fadeAliases[k.lowercase()] = v
+    }
+    loadKeyValueTable("ライブラリ\\avgシステム\\リスト\\フェードデフォルト値.txt") { k, v ->
+      v.toFloatOrNull()?.let { fadeDefaultTimesMs[k.lowercase()] = it }
+    }
+    loadKeyValueTable("ライブラリ\\avgシステム\\リスト\\フェード強度.txt") { k, v ->
+      v.toIntOrNull()?.let { fadeStrengths[k.lowercase()] = it }
     }
 
     charSpritesByCode =
@@ -341,6 +358,38 @@ class AssetAliasResolver(private val vfs: QlieVirtualFileSystem) {
       stem.contains("_d_") -> "d"
       else -> null
     }
+  }
+
+  /**
+   * Resolves a script-facing fade identifier through `フェードエイリアス.txt`, mirroring QLiE's
+   * `@@!Avg_SettingComListAliasRefer` (`avgsystem_setting.s` lines 197-221): an exact-key lookup
+   * that falls back to the identifier itself. Keys mapped to a blank value (`31=`, `36=`) also
+   * resolve to themselves, and non-numeric identifiers such as `モザイク` pass through unchanged.
+   */
+  fun resolveFadeAlias(effectOrCode: String): String {
+    val clean = effectOrCode.trim().trim('"')
+    if (clean.isEmpty()) return clean
+    val mapped = fadeAliases[clean] ?: fadeAliases[clean.lowercase()]
+    return if (mapped.isNullOrEmpty()) clean else mapped
+  }
+
+  /** Per-effect fade duration from `フェードデフォルト値.txt`, applied when a script omits the time. */
+  fun fadeDefaultTimeMs(effectOrCode: String): Float? {
+    val clean = effectOrCode.trim().trim('"')
+    if (clean.isEmpty()) return null
+    return fadeDefaultTimesMs[clean.lowercase()]
+      ?: fadeDefaultTimesMs[resolveFadeAlias(clean).lowercase()]
+  }
+
+  /**
+   * Per-effect fade softness from `フェード強度.txt`. `avgsystem_fade.s` line 88 looks this up with the
+   * raw script argument, so that is tried first; the alias-resolved name is also checked so numeric
+   * codes (`21` -> `BlindTB`) can still reach the table.
+   */
+  fun fadeStrength(effectOrCode: String): Int? {
+    val clean = effectOrCode.trim().trim('"')
+    if (clean.isEmpty()) return null
+    return fadeStrengths[clean.lowercase()] ?: fadeStrengths[resolveFadeAlias(clean).lowercase()]
   }
 
   data class CharaParamState(

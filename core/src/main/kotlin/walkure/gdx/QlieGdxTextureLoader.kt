@@ -4,10 +4,46 @@ import com.badlogic.gdx.graphics.Pixmap
 import com.badlogic.gdx.graphics.Texture
 import com.badlogic.gdx.graphics.Texture.TextureFilter
 import com.badlogic.gdx.utils.Disposable
+import walkure.EngineTrace
 import walkure.image.AbmotionParser
 import walkure.image.AbmpDecoder
 import walkure.image.ArgbDecoder
+import walkure.image.DpngDecoder
 import walkure.pack.QlieVirtualFileSystem
+
+/**
+ * Normalizes a shape-only (near-black) icon strip into a white alpha mask, in place. Some button
+ * icon strips (`button_quit.b`, `button_cancel.b`) carry black art, which no multiply tint can ever
+ * colorize, so the buttons using them would animate in black. Colored strips are returned
+ * untouched. Returns whether the pixmap was whitened.
+ */
+fun whitenBlackMaskInPlace(pixmap: Pixmap): Boolean {
+  var hasOpaque = false
+  var allBlack = true
+  for (y in 0 until pixmap.height) {
+    for (x in 0 until pixmap.width) {
+      val p = pixmap.getPixel(x, y)
+      if ((p and 0xFF) > 128) {
+        hasOpaque = true
+        val maxChannel = maxOf((p ushr 24) and 0xFF, (p ushr 16) and 0xFF, (p ushr 8) and 0xFF)
+        if (maxChannel > 16) {
+          allBlack = false
+        }
+      }
+    }
+  }
+  if (!hasOpaque || !allBlack) return false
+  val prevBlending = pixmap.blending
+  pixmap.blending = Pixmap.Blending.None
+  for (y in 0 until pixmap.height) {
+    for (x in 0 until pixmap.width) {
+      val alpha = pixmap.getPixel(x, y) and 0xFF
+      pixmap.drawPixel(x, y, (0xFFFFFF shl 8) or alpha)
+    }
+  }
+  pixmap.blending = prevBlending
+  return true
+}
 
 /**
  * Decodes QLiE `.argb` (`ARGBSaveData1`), `.b` (`abmp10`/`11`/`12`), `.jpg`, and `.png` assets from
@@ -16,19 +52,29 @@ import walkure.pack.QlieVirtualFileSystem
  */
 class QlieGdxTextureLoader(
   private val vfs: QlieVirtualFileSystem,
-  private val maxCacheEntries: Int = 220,
+  private val maxCacheEntries: Int = 512,
 ) : Disposable {
 
   private val cache =
     object : LinkedHashMap<String, Texture>(maxCacheEntries, 0.75f, true) {
       override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Texture>?): Boolean {
         if (size > maxCacheEntries && eldest != null) {
+          if (EngineTrace.enabled) {
+            EngineTrace.log("TEXTURE evict+dispose key=${eldest.key} (cache was $size entries)")
+          }
           runCatching { eldest.value.dispose() }
           return true
         }
         return false
       }
     }
+
+  /**
+   * Textures whose holders keep long-lived references (title button tiles, icon strips, and
+   * labels). Evicting and disposing one of those would leave its holder with a dead GL handle that
+   * renders black, so they bypass the evicting LRU and live until [dispose].
+   */
+  private val pinnedCache = LinkedHashMap<String, Texture>()
 
   fun loadTexture(pathOrQuery: String): Texture? {
     val resolvedEntry = vfs.resolveEntry(pathOrQuery)?.second ?: return null
@@ -64,7 +110,7 @@ class QlieGdxTextureLoader(
         }
 
         AbmpDecoder.isDpngData(rawBytes) -> {
-          val pixmap = Pixmap(rawBytes, 48, rawBytes.size - 48)
+          val pixmap = DpngDecoder.decodePixmap(rawBytes) ?: return@runCatching null
           Texture(pixmap).also { tex ->
             tex.setFilter(TextureFilter.Linear, TextureFilter.Linear)
             pixmap.dispose()
@@ -260,9 +306,9 @@ class QlieGdxTextureLoader(
         }
       } else {
         val pm =
-          if (AbmpDecoder.isDpngData(rawBytes)) Pixmap(rawBytes, 48, rawBytes.size - 48)
+          if (AbmpDecoder.isDpngData(rawBytes)) DpngDecoder.decodePixmap(rawBytes)
           else Pixmap(rawBytes, 0, rawBytes.size)
-        Texture(pm).also {
+        Texture(pm ?: return@runCatching null).also {
           it.setFilter(TextureFilter.Linear, TextureFilter.Linear)
           pm.dispose()
         }
@@ -392,8 +438,52 @@ class QlieGdxTextureLoader(
   }
 
   /**
+   * Loads a specific layer index from an `abmp` `.b` file into the [pinnedCache] (never evicted).
+   * Used for assets whose holders outlive a single frame. When [whitenBlackMask] is set, a
+   * shape-only black layer is normalized to a white alpha mask so the caller's tint colorizes it
+   * instead of multiplying down to black.
+   */
+  fun loadPinnedAbmpLayerTexture(
+    pathOrQuery: String,
+    layerIndex: Int,
+    whitenBlackMask: Boolean = false,
+  ): Texture? {
+    val resolvedEntry = vfs.resolveEntry(pathOrQuery)?.second ?: return null
+    val key = "${resolvedEntry.normalizedPath}#pinned-layer$layerIndex"
+    pinnedCache[key]?.let {
+      return it
+    }
+
+    val rawBytes = runCatching { vfs.readBytes(resolvedEntry.path) }.getOrNull() ?: return null
+    if (!AbmpDecoder.isAbmpData(rawBytes)) return null
+
+    val texture = runCatching {
+      val container = AbmpDecoder.parse(rawBytes)
+      val layers = container.allFlattenedImages()
+      val layer = layers.getOrNull(layerIndex) ?: return@runCatching null
+      val pixmap = layer.decodePixmap() ?: return@runCatching null
+      if (whitenBlackMask) {
+        whitenBlackMaskInPlace(pixmap)
+      }
+      Texture(pixmap).also { tex ->
+        tex.setFilter(TextureFilter.Linear, TextureFilter.Linear)
+        pixmap.dispose()
+      }
+    }
+      .getOrNull()
+
+    if (texture != null) {
+      pinnedCache[key] = texture
+    } else if (EngineTrace.enabled) {
+      EngineTrace.log("TEXTURE pinned layer missing: ${resolvedEntry.path} index=$layerIndex")
+    }
+    return texture
+  }
+
+  /**
    * Resolves semantic button assets (`01/02/03` tiles, icon strip / child clip, `t01/t02` labels,
-   * `Mask`) along with the parsed `abdata13` animation document.
+   * `Mask`) along with the parsed `abdata13` animation document. Layer textures are pinned: the
+   * title screen holds them across frames, so LRU eviction must never dispose them.
    */
   fun loadButtonAssets(pathOrQuery: String): LoadedButtonAssets? {
     val resolvedEntry = vfs.resolveEntry(pathOrQuery)?.second ?: return null
@@ -410,13 +500,17 @@ class QlieGdxTextureLoader(
 
     return LoadedButtonAssets(
       runtime = runtime,
-      normalTile = loadAbmpLayerTexture(resolvedEntry.path, idx.normalTileIndex),
-      hoverTile = loadAbmpLayerTexture(resolvedEntry.path, idx.hoverTileIndex),
-      downTile = loadAbmpLayerTexture(resolvedEntry.path, idx.downTileIndex),
-      iconStrip = idx.iconStripIndex?.let { loadAbmpLayerTexture(resolvedEntry.path, it) },
-      labelNormal = idx.labelNormalIndex?.let { loadAbmpLayerTexture(resolvedEntry.path, it) },
-      labelHover = idx.labelHoverIndex?.let { loadAbmpLayerTexture(resolvedEntry.path, it) },
-      mask = idx.maskIndex?.let { loadAbmpLayerTexture(resolvedEntry.path, it) },
+      normalTile = loadPinnedAbmpLayerTexture(resolvedEntry.path, idx.normalTileIndex),
+      hoverTile = loadPinnedAbmpLayerTexture(resolvedEntry.path, idx.hoverTileIndex),
+      downTile = loadPinnedAbmpLayerTexture(resolvedEntry.path, idx.downTileIndex),
+      iconStrip =
+        idx.iconStripIndex?.let {
+          loadPinnedAbmpLayerTexture(resolvedEntry.path, it, whitenBlackMask = true)
+        },
+      labelNormal =
+        idx.labelNormalIndex?.let { loadPinnedAbmpLayerTexture(resolvedEntry.path, it) },
+      labelHover = idx.labelHoverIndex?.let { loadPinnedAbmpLayerTexture(resolvedEntry.path, it) },
+      mask = idx.maskIndex?.let { loadPinnedAbmpLayerTexture(resolvedEntry.path, it) },
       iconChildNode = iconChild,
     )
   }
@@ -424,6 +518,8 @@ class QlieGdxTextureLoader(
   override fun dispose() {
     cache.values.forEach { runCatching { it.dispose() } }
     cache.clear()
+    pinnedCache.values.forEach { runCatching { it.dispose() } }
+    pinnedCache.clear()
     runtimeOwnedTextures.forEach { runCatching { it.dispose() } }
     runtimeOwnedTextures.clear()
     runtimeCache.clear()

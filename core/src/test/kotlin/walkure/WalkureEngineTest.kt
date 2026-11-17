@@ -13,6 +13,7 @@ import walkure.crypto.QlieKeyExtractor
 import walkure.gdx.QlieVfsFileHandle
 import walkure.image.AbmpDecoder
 import walkure.image.ArgbDecoder
+import walkure.image.DpngDecoder
 import walkure.pack.HonorificsMode
 import walkure.pack.QliePackReader
 import walkure.pack.QlieVirtualFileSystem
@@ -242,6 +243,19 @@ class WalkureEngineTest {
       assertTrue(AbmpDecoder.isDpngData(b0), "日付背景b_0.png must be recognized as DPNG")
       val m0 = vfs.readBytes("画像\\日付背景m_0.png")
       assertTrue(AbmpDecoder.isDpngData(m0), "日付背景m_0.png must be recognized as DPNG")
+
+      // DPNG is vertically tiled; the decoder must reconstruct the full image, not just the first
+      // strip (which is what previously produced an unfilled/stretched calendar background).
+      val m0Pixmap = DpngDecoder.decodePixmap(m0)
+      assertNotNull(m0Pixmap, "日付背景m_0.png must decode")
+      assertEquals(330, m0Pixmap.width)
+      assertEquals(226, m0Pixmap.height)
+      m0Pixmap.dispose()
+      val b0Pixmap = DpngDecoder.decodePixmap(b0)
+      assertNotNull(b0Pixmap, "日付背景b_0.png must decode")
+      assertEquals(1024, b0Pixmap.width)
+      assertEquals(768, b0Pixmap.height)
+      b0Pixmap.dispose()
 
       // Test ScenarioVm triggering day eyecatch
       val scriptContent =
@@ -902,6 +916,94 @@ class WalkureEngineTest {
         "continueWithScript must preserve active background",
       )
       assertEquals(4, snap2.transitionSpec?.mode, "モザイク transition must parse as mode=4")
+    }
+  }
+
+  @Test
+  fun testFadeAliasTablesResolveEffectsAndDefaults() {
+    QlieVirtualFileSystem(gameDir, HonorificsMode.HON).use { vfs ->
+      val resolver = AssetAliasResolver(vfs)
+
+      // フェードエイリアス.txt mirrors @@!Avg_SettingComListAliasRefer: exact-key lookup that falls
+      // back to the identifier itself, including for keys mapped to a blank value (31, 36).
+      assertEquals("cut", resolver.resolveFadeAlias("0"))
+      assertEquals("scroll", resolver.resolveFadeAlias("2"))
+      assertEquals("ブラックアウト", resolver.resolveFadeAlias("66"))
+      assertEquals(
+        "31",
+        resolver.resolveFadeAlias("31"),
+        "a blank alias value must resolve to the identifier",
+      )
+      assertEquals(
+        "wfade01a",
+        resolver.resolveFadeAlias("wfade01a"),
+        "unknown names must pass through unchanged",
+      )
+
+      // フェードデフォルト値.txt is keyed by the resolved effect, reachable from the raw code too.
+      assertEquals(750f, resolver.fadeDefaultTimeMs("scroll"))
+      assertEquals(750f, resolver.fadeDefaultTimeMs("2"))
+      // フェード強度.txt
+      assertEquals(0, resolver.fadeStrength("Blind"))
+    }
+  }
+
+  @Test
+  fun testFadeCommandsUseAliasedEffectsAndConfiguredDefaults() {
+    QlieVirtualFileSystem(gameDir, HonorificsMode.HON).use { vfs ->
+      val resolver = AssetAliasResolver(vfs)
+
+      fun fade(
+        body: String,
+        settings: walkure.config.AvgSystemSettings = walkure.config.AvgSystemSettings(),
+      ) =
+        ScenarioVm(
+            ScenarioParser.parse("シナリオ\\共通\\fade_test.s", "@@MAIN\n$body\n「x」\n"),
+            resolver,
+            settings,
+          )
+          .stepToNextStop()
+          .transitionSpec!!
+
+      // Native \fdi,0,t,f,z,p: render mode 0 with an explicit rule asset and time.
+      val ruleWipe = fade("\\fdi,0,500,scroll,990,4")
+      assertEquals("scroll", ruleWipe.effectName)
+      assertEquals(0, ruleWipe.mode)
+      assertEquals(0.5f, ruleWipe.durationSec)
+      assertEquals(4, ruleWipe.feather)
+
+      // \fdi,4,t,,z is the モザイク form the engine emits without a rule image.
+      val mosaic = fade("\\fdi,4,500,,990")
+      assertEquals("モザイク", mosaic.effectName)
+      assertEquals(4, mosaic.mode)
+
+      // Render mode 2 with no rule is the colour fade.
+      assertEquals("colorfade", fade("\\fdi,2,500,,990").effectName)
+
+      // Script-facing form: a numeric code resolves through フェードエイリアス.txt, and an omitted
+      // time falls back to フェードデフォルト値.txt (scroll = 750ms) instead of a hardcoded value.
+      val aliased = fade("\\fade,2,")
+      assertEquals("scroll", aliased.effectName)
+      assertEquals(0.75f, aliased.durationSec)
+
+      // `overlap` dissolves without a rule image (avgsystem_fade.s lines 225-232).
+      assertEquals("crossfade", fade("\\fade,overlap,300").effectName)
+
+      // `cut` (alias 0) collapses to an instantaneous transition, whatever time is passed.
+      val cut = fade("\\fade,0,300")
+      assertEquals("cut", cut.effectName)
+      assertEquals(0.01f, cut.durationSec)
+
+      // With no per-effect entry, FadeTime_def of the 通常 channel applies and is overridable.
+      assertEquals(0.8f, fade("\\fade,crossfade,").durationSec)
+      assertEquals(
+        1.234f,
+        fade("\\fade,crossfade,", walkure.config.AvgSystemSettings(defaultBgFadeMs = 1234))
+          .durationSec,
+      )
+
+      // フェード強度.txt supplies softness when the script omits FadeParam.
+      assertEquals(0, fade("\\fade,Blind,").feather)
     }
   }
 }

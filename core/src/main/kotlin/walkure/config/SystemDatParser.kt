@@ -37,6 +37,16 @@ data class AvgSystemSettings(
   val defaultSoundFadeMs: Int = 1000,
   val spriteActionOffsetX: Int = 20,
   val spriteActionOffsetY: Int = -20,
+  /** `FadeParam_def` of the 通常 fade channel (`フェード設定_デフォルト.txt`): rule softness 0..7. */
+  val defaultBgFadeParam: Int = 3,
+  /** `FadeParam_def` of the 立ち絵 fade channel (`フェード設定_立ち絵.txt`). */
+  val defaultSpriteFadeParam: Int = 4,
+  /**
+   * `FadeDefaltList` (sic) of the 通常 channel. When 1, a fade with no explicit time consults
+   * `フェードデフォルト値.txt` per effect before falling back to [defaultBgFadeMs] (`avgsystem_fade.s` lines
+   * 243-262). The 立ち絵 channel omits the key and skips that table.
+   */
+  val bgFadeUsesDefaultTimeList: Boolean = true,
 )
 
 data class VoiceActorChannel(
@@ -136,6 +146,9 @@ object SystemDatParser {
       defaultSoundFadeMs = sndFade["Time_def"]?.toIntOrNull() ?: 1000,
       spriteActionOffsetX = charaAction["X_addS"]?.toIntOrNull() ?: 20,
       spriteActionOffsetY = charaAction["Y_addS"]?.toIntOrNull() ?: -20,
+      defaultBgFadeParam = defFade["FadeParam_def"]?.toIntOrNull() ?: 3,
+      defaultSpriteFadeParam = charaFade["FadeParam_def"]?.toIntOrNull() ?: 4,
+      bgFadeUsesDefaultTimeList = (defFade["FadeDefaltList"]?.toIntOrNull() ?: 1) == 1,
     )
   }
 
