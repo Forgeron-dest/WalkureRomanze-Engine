@@ -30,5 +30,5 @@ jobs:
           java-version: "21"
           cache: gradle
 
-      - name: Compile desktop and test sources
-        run: ./gradlew --no-daemon :desktop:compileKotlin :core:testClasses
+      - name: Check formatting and compile sources
+        run: ./gradlew --no-daemon spotlessCheck :desktop:compileKotlin :core:testClasses
