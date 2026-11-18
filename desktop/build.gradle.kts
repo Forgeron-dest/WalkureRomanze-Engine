@@ -26,7 +26,7 @@ dependencies {
 }
 
 kotlin {
-    jvmToolchain(21)
+    jvmToolchain(25)
 }
 
 val modernJvmNativeArgs = listOf(
@@ -108,8 +108,8 @@ val packageLinux = tasks.register("packageLinux") {
             JAVA_BIN=java
             if [ -n "${'$'}JAVA_HOME" ] && [ -x "${'$'}JAVA_HOME/bin/java" ]; then
                 JAVA_BIN="${'$'}JAVA_HOME/bin/java"
-            elif [ -x "${'$'}HOME/.gradle/jdks/eclipse_adoptium-21-amd64-linux.2/bin/java" ]; then
-                JAVA_BIN="${'$'}HOME/.gradle/jdks/eclipse_adoptium-21-amd64-linux.2/bin/java"
+            elif [ -x "${'$'}HOME/.gradle/jdks/eclipse_adoptium-25-amd64-linux.2/bin/java" ]; then
+                JAVA_BIN="${'$'}HOME/.gradle/jdks/eclipse_adoptium-25-amd64-linux.2/bin/java"
             fi
             JAR_PATH="${'$'}DIR/walkure-romanze-desktop.jar"
             [ ! -f "${'$'}JAR_PATH" ] && JAR_PATH="${'$'}DIR/walkure-kotlin/build/dist/walkure-romanze-desktop.jar"

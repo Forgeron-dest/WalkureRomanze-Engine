@@ -5,7 +5,7 @@ This guide explains how to compile the **Walkure Romanze** Android `.apk` and ru
 ### Prerequisites
 
 - Git to clone the repository.
-- JDK 21 for the project toolchain. The wrapper downloads Gradle 9.9.1; its configured JDK 25 daemon may be downloaded on the first Gradle run. The SDK setup scripts do not install Java.
+- JDK 25 for the project toolchain. The wrapper downloads Gradle 9.9.1; its configured JDK 25 daemon may be downloaded on the first Gradle run. The SDK setup scripts do not install Java.
 - Internet access for Gradle, dependencies, the daemon JDK, and Android SDK packages.
 - Android SDK `platform-tools`, `platforms;android-36`, and `build-tools;36.0.0`. The setup scripts install these packages; Gradle generates the ignored native libraries automatically.
 - Your own game installation to play: `GameData/data*.pack` and a valid `GameData/walkure.keys`. The restore script can generate the key from the local executable and DLL. The custom font and startup logo are optional.
