@@ -1,6 +1,6 @@
 # Walkure Romanze — Kotlin + LibGDX Visual Novel Engine
 
-A clean-room, memory-safe **Kotlin/JVM 21** engine and reverse-engineering toolkit for *Walkure Romanze*, using **LibGDX 1.14.2** and **LibKTX 1.13.1-rc1**. It supports QLiE `FilePackVer3.0` and `FilePackVer1.0` archives.
+A clean-room, memory-safe **Kotlin/JVM 25** engine and reverse-engineering toolkit for *Walkure Romanze*, using **LibGDX 1.14.2** and **LibKTX 1.13.1-rc1**. It supports QLiE `FilePackVer3.0` and `FilePackVer1.0` archives.
 
 > **The game and its copyrighted assets are not included.** You need your own game installation and valid game data to play. Clone this repository inside that installation folder; do not clone over or replace the original game files.
 
@@ -20,7 +20,7 @@ A clean-room, memory-safe **Kotlin/JVM 21** engine and reverse-engineering toolk
 ### Requirements
 
 - Git and internet access.
-- JDK 21 for the project toolchain. The Gradle wrapper downloads Gradle 9.9.1; its configured JDK 25 daemon may also be downloaded on first run.
+- JDK 25 for the project toolchain. The Gradle wrapper downloads Gradle 9.9.1; its configured JDK 25 daemon may also be downloaded on first run.
 - Your own game installation, including `GameData/data*.pack` and a valid `GameData/walkure.keys`. The asset-restoration script can generate the key if the local game executable and DLL are available.
 
 **Windows has not been tested.** The application, Windows launchers and scripts, packaging, and Android builds on Windows are unverified.
