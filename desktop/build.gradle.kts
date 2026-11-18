@@ -18,6 +18,7 @@ val gdxVersion = "1.14.2"
 
 dependencies {
     implementation(project(":core"))
+    implementation(platform("org.lwjgl:lwjgl-bom:3.4.3"))
 
     // LibGDX Desktop Backend (LWJGL3) & Desktop Natives
     implementation("com.badlogicgames.gdx:gdx-backend-lwjgl3:$gdxVersion")
