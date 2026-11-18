@@ -44,6 +44,7 @@ fun main(args: Array<String>) {
     "extract" -> runExtract(gameDir, honorifics, args)
     "inspect-script" -> runInspectScript(gameDir, honorifics, args)
     "play" -> {
+      DesktopFileLogging.install(File(gameDir, "walkure.log"))
       val scriptQuery = findOptionValue(args, "--script")
       val debugMode = args.contains("--debug") || args.contains("--debug-hud")
       val vfs = QlieVirtualFileSystem(gameDir, honorifics)

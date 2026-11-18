@@ -69,6 +69,13 @@ To start from a scenario script:
 
 On Windows, use `.\gradlew.bat` instead of `./gradlew`.
 
+Desktop `play` runs write LibGDX, LibKTX, and application stdout/stderr (including printed stack
+traces) to `walkure.log` in the resolved game directory, while continuing to show output in the
+console. Android writes the same logs to `Android/data/org.walkure.android/files/logs/walkure.log`
+on shared storage, or to the app's internal files directory if external app storage is unavailable.
+Both files are replaced when the game starts; Android also continues forwarding LibGDX logs to
+Logcat.
+
 ### Export a portable key
 
 Generate the 512-byte `GameData/walkure.keys` file used to decrypt `data0.pack` through `data9.pack`:
