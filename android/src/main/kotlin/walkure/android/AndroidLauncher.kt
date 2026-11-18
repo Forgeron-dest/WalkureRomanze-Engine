@@ -4,6 +4,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import com.badlogic.gdx.ApplicationLogger
 import com.badlogic.gdx.backends.android.AndroidApplication
 import com.badlogic.gdx.backends.android.AndroidApplicationConfiguration
 import java.io.File
@@ -17,6 +18,7 @@ import walkure.pack.QlieVirtualFileSystem
  */
 class AndroidLauncher : AndroidApplication() {
   private var videoPlayer: AndroidVideoPlayer? = null
+  private var runtimeLogging: AndroidRuntimeLogging? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -28,6 +30,8 @@ class AndroidLauncher : AndroidApplication() {
       finish()
       return
     }
+
+    runtimeLogging = AndroidRuntimeLogging.install(this)
 
     val defaultDir = getExternalFilesDir(null) ?: filesDir
     val sourceKey = File(defaultDir, "walkure.keys")
@@ -68,6 +72,12 @@ class AndroidLauncher : AndroidApplication() {
     setContentView(container)
   }
 
+  override fun setApplicationLogger(applicationLogger: ApplicationLogger) {
+    super.setApplicationLogger(
+      runtimeLogging?.wrapApplicationLogger(applicationLogger) ?: applicationLogger,
+    )
+  }
+
   override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
     if (keyCode == android.view.KeyEvent.KEYCODE_BACK && videoPlayer?.isPlaying() == true) {
       videoPlayer?.stop()
@@ -79,5 +89,8 @@ class AndroidLauncher : AndroidApplication() {
   override fun onDestroy() {
     videoPlayer?.dispose()
     super.onDestroy()
+    runtimeLogging?.originalApplicationLogger()?.let { super.setApplicationLogger(it) }
+    runtimeLogging?.close()
+    runtimeLogging = null
   }
 }

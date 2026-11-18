@@ -1,7 +1,11 @@
 build
+walkure.log
 .idea
 .gradle
 local.properties
 android/libs/
 android/src/main/assets/
 android/src/main/res/mipmap-*/ic_launcher*.png
+desktop/bin/
+core/bin/
+android/bin/

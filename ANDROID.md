@@ -124,6 +124,22 @@ This detects your phone and pushes the `data*.pack` archives, `walkure.keys` whe
 
 On Windows, run `.\scripts\push-game-data.bat` from Command Prompt or PowerShell; it looks for ADB on `PATH` or in common Android SDK locations.
 
+## Runtime Logs
+
+While the game is running, logs and stack traces are written to:
+
+```text
+Android/data/org.walkure.android/files/logs/walkure.log
+```
+
+The file is replaced each time the game starts. LibGDX logs continue to appear in Logcat as well.
+If Android's app-specific external storage is unavailable, the file is written to the app's
+internal files directory instead. To copy the usual external-storage log to your computer:
+
+```bash
+adb pull /sdcard/Android/data/org.walkure.android/files/logs/walkure.log .
+```
+
 ---
 
 ## 🎮 Touch Controls
