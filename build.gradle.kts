@@ -9,6 +9,8 @@ plugins {
     kotlin("jvm") version "2.4.21" apply false
 }
 
+version = System.getenv("WALKURE_VERSION")?.takeIf(String::isNotBlank) ?: "1.0.0"
+
 spotless {
     kotlin {
         target("**/*.kt")

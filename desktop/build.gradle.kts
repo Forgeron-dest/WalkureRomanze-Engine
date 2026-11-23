@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "org.walkure"
-version = "1.0.0"
+version = rootProject.version
 
 repositories {
     google()
@@ -54,6 +54,7 @@ val packageFatJar = tasks.register<Jar>("packageFatJar") {
 
     manifest {
         attributes["Main-Class"] = "walkure.MainKt"
+        attributes["Implementation-Version"] = project.version.toString()
     }
 
     from(sourceSets.main.get().output)
@@ -163,6 +164,7 @@ val packageWindows = tasks.register("packageWindows") {
             """
             --type app-image
             --name WalkureRomanze
+            --app-version ${project.version.toString().substringBefore('-').substringBefore('+')}
             --input jpackage-input
             --main-jar walkure-romanze-desktop.jar
             --main-class walkure.MainKt
