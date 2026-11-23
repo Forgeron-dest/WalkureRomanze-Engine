@@ -13,6 +13,7 @@ package walkure.script
 class ScenarioVm(
   var currentScript: ScenarioScript,
   private val aliasResolver: AssetAliasResolver? = null,
+  private val avgSettings: walkure.config.AvgSystemSettings = walkure.config.AvgSystemSettings(),
   private val branchEvaluator: ((String) -> CampaignConductor.BranchOutcome?)? = null,
 ) {
   data class ChoiceOption(
@@ -440,7 +441,8 @@ class ScenarioVm(
     fromAbgOrMbg: Boolean = false,
     fadeParam: String? = null,
   ) {
-    val rawFade = fadeName?.trim()?.trim('"').orEmpty()
+    val rawFadeName = fadeName?.trim()?.trim('"').orEmpty()
+    val rawFade = resolveFadeAlias(rawFadeName)
     val isCut = rawFade.equals("cut", ignoreCase = true) || rawFade.equals("カット", ignoreCase = true)
     val isMosaic =
       rawFade.equals("モザイク", ignoreCase = true) || rawFade.equals("mosaic", ignoreCase = true)
@@ -448,7 +450,10 @@ class ScenarioVm(
       rawFade.startsWith("wfade", ignoreCase = true) ||
         rawFade.startsWith("motion", ignoreCase = true) ||
         rawFade.endsWith(".b", ignoreCase = true)
-    val featherVal = fadeParam?.trim()?.toIntOrNull()?.coerceIn(0, 7) ?: 3
+    val featherVal =
+      fadeParam?.trim()?.toIntOrNull()?.coerceIn(0, 7)
+        ?: fadeStrengthFor(rawFadeName)
+        ?: avgSettings.defaultBgFadeParam
     val effDuration =
       when {
         isCut -> 0.01f
@@ -463,7 +468,8 @@ class ScenarioVm(
         else -> "crossfade"
       }
     val effMode = if (isMosaic) 4 else 0
-    if (isWfade || isMosaic || lastTransitionSpec == null) {
+    val replacesSpec = isWfade || isMosaic || lastTransitionSpec == null
+    if (replacesSpec) {
       lastTransitionSpec =
         TransitionSpec(
           effectName = effName,
@@ -471,6 +477,14 @@ class ScenarioVm(
           mode = effMode,
           feather = featherVal,
         )
+    }
+    if (walkure.EngineTrace.enabled) {
+      walkure.EngineTrace.log(
+        "VM bg ${currentScript.path}:${currentLineNumber} base=\"$baseSymbol\" " +
+          "fade=\"$fadeName\"->\"$rawFade\" fadeMs=${fadeMs} eff=$effName " +
+          "dur=${effDuration}s feather=$featherVal mode=$effMode " +
+          "spec=${if (replacesSpec) "REPLACED" else "KEPT-STICKY"} ${walkure.EngineTrace.id(lastTransitionSpec)}",
+      )
     }
 
     val cleanSym = baseSymbol?.trim()?.trim('"')?.substringBefore(':').orEmpty()
@@ -561,51 +575,114 @@ class ScenarioVm(
     }
   }
 
-  private fun applyFdiOrFade(isFdi: Boolean, args: List<String>) {
-    if (isFdi) {
-      val raw0 = args.getOrNull(0)?.trim()?.trim('"').orEmpty()
-      val parsedMode = raw0.toIntOrNull()
-      if (parsedMode != null) {
-        val ms = args.getOrNull(1)?.trim()?.toFloatOrNull() ?: 400f
-        val fileOrRule = args.getOrNull(2)?.trim()?.trim('"').orEmpty()
-        val paramVal =
-          args.getOrNull(4)?.trim()?.toIntOrNull()?.coerceIn(0, 7)
-            ?: args.getOrNull(3)?.trim()?.toIntOrNull()?.coerceIn(0, 7)
-            ?: 3
-        val isMosaic =
-          parsedMode == 4 ||
-            fileOrRule.equals("モザイク", ignoreCase = true) ||
-            fileOrRule.equals("mosaic", ignoreCase = true)
-        val effName =
-          when {
-            isMosaic -> "モザイク"
-            fileOrRule.isNotEmpty() -> fileOrRule
-            parsedMode == 2 -> "colorfade"
-            else -> "crossfade"
-          }
-        lastTransitionSpec =
-          TransitionSpec(
-            effectName = effName,
-            durationSec = (ms / 1000f).coerceIn(0.05f, 3.5f),
-            mode = if (isMosaic) 4 else parsedMode,
-            feather = paramVal,
-          )
-        return
-      }
-    }
-    val effArg = args.getOrNull(0)?.trim()?.trim('"').orEmpty()
-    val ms = args.getOrNull(1)?.trim()?.toFloatOrNull() ?: 400f
-    val featherVal = args.getOrNull(2)?.trim()?.toIntOrNull()?.coerceIn(0, 7) ?: 3
+  /** `フェードエイリアス.txt` lookup that degrades to identity when no resolver is wired in. */
+  private fun resolveFadeAlias(effectOrCode: String): String =
+    aliasResolver?.resolveFadeAlias(effectOrCode) ?: effectOrCode
+
+  /** `フェード強度.txt` lookup for a raw script identifier. */
+  private fun fadeStrengthFor(effectOrCode: String): Int? =
+    effectOrCode.takeIf { it.isNotEmpty() }?.let { aliasResolver?.fadeStrength(it) }
+
+  /**
+   * Fade duration in milliseconds when a script omits it: the per-effect entry in `フェードデフォルト値.txt`
+   * (only consulted for the 通常 channel, i.e. when `FadeDefaltList=1`), then that channel's
+   * `FadeTime_def` — the exact chain of `avgsystem_fade.s` lines 243-262.
+   */
+  private fun defaultFadeMsFor(effectOrCode: String): Float =
+    effectOrCode
+      .takeIf { it.isNotEmpty() && avgSettings.bgFadeUsesDefaultTimeList }
+      ?.let { aliasResolver?.fadeDefaultTimeMs(it) } ?: avgSettings.defaultBgFadeMs.toFloat()
+
+  private data class ResolvedFade(
+    val identifier: String,
+    val effectName: String,
+    val mode: Int,
+  )
+
+  /**
+   * Normalises a fade identifier the way `avgsystem_fade.s` does: alias-resolve it (lines 50-52),
+   * then treat blank, `overlap` and `None` as a plain dissolve without a rule image (lines
+   * 225-232), `cut` as a zero-length dissolve (lines 75-80), `モザイク` as render mode 4, and
+   * `motion_*` as an animation container rather than a grayscale wipe rule (lines 303-349).
+   */
+  private fun resolveFade(identifier: String, renderMode: Int?): ResolvedFade {
+    val aliased = resolveFadeAlias(identifier)
     val isMosaic =
-      effArg.equals("モザイク", ignoreCase = true) || effArg.equals("mosaic", ignoreCase = true)
-    val isCut = effArg.equals("cut", ignoreCase = true) || effArg.equals("カット", ignoreCase = true)
+      renderMode == 4 ||
+        aliased.equals("モザイク", ignoreCase = true) ||
+        aliased.equals("mosaic", ignoreCase = true)
+    if (isMosaic) return ResolvedFade(identifier, "モザイク", 4)
+    if (aliased.equals("cut", ignoreCase = true) || aliased.equals("カット", ignoreCase = true)) {
+      return ResolvedFade(identifier, "cut", renderMode ?: 0)
+    }
+    val isPlain =
+      aliased.isEmpty() ||
+        aliased.equals("overlap", ignoreCase = true) ||
+        aliased.equals("crossfade", ignoreCase = true) ||
+        aliased.equals("fade", ignoreCase = true) ||
+        aliased.equals("none", ignoreCase = true)
+    if (isPlain) {
+      return ResolvedFade(
+        identifier,
+        if (renderMode == 2) "colorfade" else "crossfade",
+        renderMode ?: 0,
+      )
+    }
+    return ResolvedFade(
+      identifier,
+      aliased,
+      renderMode ?: 0,
+    )
+  }
+
+  /**
+   * Builds a [TransitionSpec] from `^fdi` / `^fade` arguments. `^fdi` is the engine-native form
+   * that `avgsystem_fade.s` emits as `\fdi,0,t2,f,z,p` for rule wipes and `\fdi,4,t2,,z` for モザイク,
+   * so its first argument is a render mode (0 = rule wipe, 2 = colour fade, 4 = mosaic) and its
+   * third is the rule asset. `^fade` is the script-facing form whose leading argument is an effect
+   * identifier that may be a numeric `フェードエイリアス.txt` code, followed by time and softness.
+   */
+  private fun applyFdiOrFade(isFdi: Boolean, args: List<String>) {
+    val raw0 = args.getOrNull(0)?.trim()?.trim('"').orEmpty()
+    val renderMode = if (isFdi) raw0.toIntOrNull() else null
+    val identifier =
+      if (renderMode != null) args.getOrNull(2)?.trim()?.trim('"').orEmpty() else raw0
+    val explicitMs = args.getOrNull(1)?.trim()?.toFloatOrNull()
+    val explicitFeather =
+      (if (renderMode != null) args.getOrNull(4) ?: args.getOrNull(3) else args.getOrNull(2))
+        ?.trim()
+        ?.toIntOrNull()
+
+    val fade = resolveFade(identifier, renderMode)
+    val ms = explicitMs ?: defaultFadeMsFor(identifier)
+    val durationSec =
+      when {
+        // `@@!Avg_FadeFadeExcute` skips the wipe entirely once the scaled time drops to 10ms.
+        fade.effectName == "cut" || ms <= 10f -> 0.01f
+        else -> (ms / 1000f).coerceIn(0.05f, 3.5f)
+      }
+
+    val featherVal =
+      explicitFeather?.coerceIn(0, 7)
+        ?: fadeStrengthFor(identifier)
+        ?: avgSettings.defaultBgFadeParam
+
     lastTransitionSpec =
       TransitionSpec(
-        effectName = effArg.ifEmpty { "crossfade" },
-        durationSec = if (isCut) 0.01f else (ms / 1000f).coerceIn(0.05f, 3.5f),
-        mode = if (isMosaic) 4 else 0,
+        effectName = fade.effectName,
+        durationSec = durationSec,
+        mode = fade.mode,
         feather = featherVal,
       )
+
+    if (walkure.EngineTrace.enabled) {
+      walkure.EngineTrace.log(
+        "VM ${if (isFdi) "^fdi" else "^fade"} ${currentScript.path}:${currentLineNumber} " +
+          "args=$args identifier=\"$identifier\" -> spec=${walkure.EngineTrace.id(lastTransitionSpec)} " +
+          "name=${fade.effectName} mode=${fade.mode} dur=${durationSec}s feather=$featherVal " +
+          "timeSource=${if (explicitMs != null) "explicit" else "default"}",
+      )
+    }
   }
 
   private fun handleEngineCall(call: ScenarioNode.EngineCall) {
@@ -855,7 +932,7 @@ class ScenarioVm(
         val fadeMs =
           timeArg
             ?: fadeParam?.substringAfter("FadeTime=", "")?.substringBefore(';')?.toFloatOrNull()
-            ?: 400f
+            ?: defaultFadeMsFor(fadeName.trim('"'))
 
         if (slotIdx == 0) {
           updateBgSlot0(baseFile, fadeName, fadeMs, fromAbgOrMbg = false, fadeParam = rawFadeParam)

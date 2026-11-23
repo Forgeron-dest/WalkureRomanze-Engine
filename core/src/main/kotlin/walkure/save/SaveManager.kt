@@ -88,7 +88,14 @@ class SaveManager(val gameDir: File) {
 
   val mutedVoiceActors = HashSet<Int>() // indices into voicedata.dat act[0..14]
   val clearedRoutes = HashSet<String>() // "mio", "sui", "noe", "ris"
-  private val readLineKeys = HashSet<String>()
+  /**
+   * Furthest line reached per script path, instead of one entry per line. Scenario files are read
+   * linearly, so this carries the same skip-unread meaning while keeping `readLines` to one entry
+   * per file (~511) rather than one per line — the per-line set is what let
+   * `kotlin_sysdata.properties` grow to hundreds of megabytes.
+   */
+  private val readLineProgress = HashMap<String, Int>()
+  private var readMarksSinceSave = 0
   val unlockedCgs = HashSet<String>()
   val unlockedBgm = HashSet<String>()
 
@@ -96,20 +103,42 @@ class SaveManager(val gameDir: File) {
     loadSystemData()
   }
 
+  /**
+   * The [codeKeySeed] the system save was last fully parsed with. `init` already loads with the
+   * default key, and `WalkureGdxGame` calls this again right after assigning `gameDat.codeKey`,
+   * which is the same value in every shipping build — without this guard the whole decrypt, chunk
+   * scan and property parse runs twice at boot (~3.7s of the measured 7.5s).
+   */
+  private var systemDataParsedWithKey: Int? = null
+
   fun isSpecialUnlocked(): Boolean =
     clearedRoutes.isNotEmpty() || unlockedCgs.isNotEmpty() || unlockedBgm.isNotEmpty()
 
   fun isLineRead(scriptPath: String, lineNumber: Int): Boolean {
-    return readLineKeys.contains("${scriptPath.lowercase()}#$lineNumber")
+    return (readLineProgress[scriptPath.lowercase()] ?: -1) >= lineNumber
   }
 
   fun markLineRead(scriptPath: String, lineNumber: Int) {
-    if (readLineKeys.add("${scriptPath.lowercase()}#$lineNumber")) {
-      if (readLineKeys.size % 10 == 0) {
-        saveSystemData()
-      }
+    val key = scriptPath.lowercase()
+    if (lineNumber <= (readLineProgress[key] ?: -1)) return
+    readLineProgress[key] = lineNumber
+    readMarksSinceSave++
+    if (readMarksSinceSave >= READ_MARKS_PER_SAVE) {
+      readMarksSinceSave = 0
+      saveSystemData()
     }
   }
+
+  /** Folds one stored `path#line` entry into [readLineProgress], keeping the largest line. */
+  private fun mergeReadEntry(raw: String) {
+    val key = raw.substringBeforeLast('#').trim().lowercase()
+    val line = raw.substringAfterLast('#').trim().toIntOrNull()
+    if (key.isEmpty() || line == null || !isPlausibleKey(key)) return
+    readLineProgress[key] = maxOf(readLineProgress[key] ?: -1, line)
+  }
+
+  private fun readEntryStrings(): List<String> =
+    readLineProgress.entries.map { "${it.key}#${it.value}" }
 
   fun markCgViewed(cgPath: String) {
     if (unlockedCgs.add(cgPath.lowercase())) {
@@ -162,7 +191,31 @@ class SaveManager(val gameDir: File) {
     saveSystemData()
   }
 
-  fun loadSystemData() {
+  /**
+   * Progress keys are stored as lowercased VFS paths (`画像\bg21_d_a_0_a.jpg`) or `path#line`
+   * (`シナリオ\共通\kyo_002_05.s#38`). The native `SystemData.dat` chunk scan can emit megabyte runs of
+   * undecodable bytes, and accepting those used to grow `kotlin_sysdata.properties` into a single
+   * 437 MB `unlockedCgs=` value that then had to be parsed at every boot. Anything implausible is
+   * dropped here, so a corrupted file repairs itself on the next save.
+   */
+  private fun isPlausibleKey(key: String): Boolean {
+    if (key.isEmpty() || key.length > MAX_PROGRESS_KEY_LENGTH) return false
+    return key.all { ch ->
+      ch.isLetterOrDigit() ||
+        ch == '_' ||
+        ch == '-' ||
+        ch == '.' ||
+        ch == '\\' ||
+        ch == '/' ||
+        ch == '#' ||
+        ch.code in 0x3000..0x9FFF
+    }
+  }
+
+  fun loadSystemData(force: Boolean = false) {
+    if (!force && systemDataParsedWithKey == codeKeySeed) return
+    systemDataParsedWithKey = codeKeySeed
+
     val candidateSysDat = buildList {
       if (nativeSysFile.exists()) add(nativeSysFile)
       QlieSaveInterop.resolveNativeSaveDirectories(gameDir).forEach { dir ->
@@ -222,7 +275,7 @@ class SaveManager(val gameDir: File) {
         .getProperty("clearedRoutes", "")
         .split(',')
         .map { it.trim() }
-        .filter { it.isNotEmpty() }
+        .filter { isPlausibleKey(it) }
         .forEach { clearedRoutes.add(it) }
 
       unlockedCgs.clear()
@@ -230,7 +283,7 @@ class SaveManager(val gameDir: File) {
         .getProperty("unlockedCgs", "")
         .split(';')
         .map { it.trim() }
-        .filter { it.isNotEmpty() }
+        .filter { isPlausibleKey(it) }
         .forEach { unlockedCgs.add(it) }
 
       unlockedBgm.clear()
@@ -238,28 +291,24 @@ class SaveManager(val gameDir: File) {
         .getProperty("unlockedBgm", "")
         .split(';')
         .map { it.trim() }
-        .filter { it.isNotEmpty() }
+        .filter { isPlausibleKey(it) }
         .forEach { unlockedBgm.add(it) }
 
-      readLineKeys.clear()
-      props
-        .getProperty("readLines", "")
-        .split(';')
-        .map { it.trim() }
-        .filter { it.isNotEmpty() }
-        .forEach { readLineKeys.add(it) }
+      readLineProgress.clear()
+      props.getProperty("readLines", "").split(';').forEach { mergeReadEntry(it) }
 
       // Merge seen CGs/BGM/routes from native SystemData.dat if present
       if (nativeParsed != null) {
         nativeParsed.seenCgs.forEach { entry ->
           val clean = entry.lowercase().trim()
+          if (!isPlausibleKey(clean)) return@forEach
           if (clean.endsWith(".ogg") || clean.startsWith("bgm")) {
             unlockedBgm.add(clean.substringAfterLast('\\').substringAfterLast('/'))
           } else if (clean.length >= 3) {
             unlockedCgs.add(clean)
           }
         }
-        nativeParsed.readEntries.forEach { readLineKeys.add(it) }
+        nativeParsed.readEntries.forEach { mergeReadEntry(it) }
         nativeParsed.vars["SysClearedRoutes"]
           ?.strValue
           ?.split(',')
@@ -285,7 +334,7 @@ class SaveManager(val gameDir: File) {
       setProperty("clearedRoutes", clearedRoutes.joinToString(","))
       setProperty("unlockedCgs", unlockedCgs.joinToString(";"))
       setProperty("unlockedBgm", unlockedBgm.joinToString(";"))
-      setProperty("readLines", readLineKeys.joinToString(";"))
+      setProperty("readLines", readEntryStrings().joinToString(";"))
     }
 
   fun saveSystemData() {
@@ -315,7 +364,7 @@ class SaveManager(val gameDir: File) {
         QlieSaveInterop.writeSystemData(
           vars = nativeVars,
           seenCgs = seenAll,
-          readEntries = readLineKeys,
+          readEntries = readEntryStrings(),
           kotlinProps = props,
           keySeed = codeKeySeed,
         )
@@ -520,4 +569,12 @@ class SaveManager(val gameDir: File) {
 
   private fun slotThumbnailFile(slotNumber: Int): File =
     File(saveDir, String.format("slot_%02d.png", slotNumber))
+
+  private companion object {
+    /** Longest progress key accepted from a save file or `SystemData.dat` scan. */
+    const val MAX_PROGRESS_KEY_LENGTH = 256
+
+    /** How many newly read lines may accumulate before the system save is rewritten. */
+    const val READ_MARKS_PER_SAVE = 25
+  }
 }

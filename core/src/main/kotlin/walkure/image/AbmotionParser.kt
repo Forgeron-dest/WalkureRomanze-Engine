@@ -1,6 +1,7 @@
 package walkure.image
 
 import kotlin.math.pow
+import kotlin.math.roundToInt
 import walkure.crypto.QlieCipher
 import walkure.crypto.readIntLE
 import walkure.crypto.readUInt16LE
@@ -40,7 +41,6 @@ object AbmotionParser {
     val alpha: Float,
     val pivotX: Float,
     val pivotY: Float,
-    val isExplicitKey: Boolean,
   )
 
   data class AbmotionLayer(
@@ -104,6 +104,46 @@ object AbmotionParser {
     val labelHoverIndex: Int?,
     val maskIndex: Int?,
   )
+
+  /** One sprite of a `kfType == 20` particle field: local position, variant, loop offset. */
+  data class ParticlePlacement(
+    val x: Float,
+    val y: Float,
+    val trackIndex: Int,
+    val timeOffsetMs: Float,
+  )
+
+  /**
+   * Deterministic layout for `kfType == 20` particle emitters (sakura petals, grass tufts,
+   * sparkles). The emitter's `scaleX/scaleY` give the emission-rect size in pixels and its
+   * position/pivot the rect center; variant tracks and loop offsets cycle per particle so petals
+   * differ in shape and phase. Pure function of its inputs (seeded only by [seedKey]), so the field
+   * is stable across frames while each petal animates through its own nested timeline.
+   */
+  fun particleFieldLayout(
+    ev: EvaluatedLayerState,
+    seedKey: String,
+    trackCount: Int,
+    childDurMs: Int,
+  ): List<ParticlePlacement> {
+    val w = ev.scaleXPercent
+    val h = ev.scaleYPercent
+    if (w <= 0f || h <= 0f || trackCount <= 0 || childDurMs <= 0) {
+      return listOf(ParticlePlacement(ev.x, ev.y, 0, 0f))
+    }
+    val count = ((w * h / 60000f).roundToInt()).coerceIn(4, 20)
+    val left = ev.x - w * ev.pivotX
+    val top = ev.y - h * ev.pivotY
+    val rng = kotlin.random.Random(seedKey.hashCode())
+    return List(count) { i ->
+      ParticlePlacement(
+        x = left + rng.nextFloat() * w,
+        y = top + rng.nextFloat() * h,
+        trackIndex = i % trackCount,
+        timeOffsetMs = i * childDurMs.toFloat() / count,
+      )
+    }
+  }
 
   fun parseAbdata(bytes: ByteArray): AbdataDocument? {
     if (bytes.size < 32) return null
@@ -252,20 +292,21 @@ object AbmotionParser {
       alpha = alpha,
       pivotX = pivotX,
       pivotY = pivotY,
-      isExplicitKey = kfType != 0,
     )
   }
 
   /**
    * Evaluates a track at [timeMs] into a Z-ordered list of active [EvaluatedLayerState]s. Supports
    * parent camera/modifier layers (`groupRole == 1`) affecting subsequent child layers (`groupRole
-   * == 2`).
+   * == 2`), plus lone art layers heading an `[art, live-child]` pair (calendar shadow+card, day
+   * tens+ones), which share the pending modifier with their child.
    */
   fun evaluateTrack(track: AbmotionTrack, timeMs: Float): List<EvaluatedLayerState> {
     val result = ArrayList<EvaluatedLayerState>(track.layers.size)
     var currentModifier: EvaluatedLayerState? = null
+    val layers = track.layers
 
-    for (layer in track.layers) {
+    for ((index, layer) in layers.withIndex()) {
       if (!layer.enabled || layer.keyframes.isEmpty()) continue
       val eval = evaluateLayer(layer, timeMs)
       if (layer.groupRole == 1) {
@@ -273,8 +314,17 @@ object AbmotionParser {
         continue
       }
 
+      // A lone art layer heading an [art, live-child] pair (calendar shadow+card, day tens+ones)
+      // shares the pending modifier with its child so the pair renders as a unit; standalone
+      // art layers ignore it.
+      val sharesModifier =
+        layer.groupRole == 2 ||
+          (layer.groupRole == 0 &&
+            layers.getOrNull(index + 1)?.let { next ->
+              next.groupRole == 2 && next.keyframes.any { kf -> kf.kfType != 0 }
+            } == true)
       val finalEval =
-        if (layer.groupRole == 2 && currentModifier != null && eval.visible) {
+        if (currentModifier != null && eval.visible && sharesModifier) {
           val mod = currentModifier
           eval.copy(
             x = eval.x + mod.x,
@@ -295,80 +345,232 @@ object AbmotionParser {
     return result.sortedBy { it.zPriority }
   }
 
+  /**
+   * Evaluates one layer at [timeMs].
+   *
+   * Keyframe roles, reverse-engineered from `スクリプト\title\back.b` and `モーション\日付アイキャッチ.b`:
+   * - A layer is live from its first keyframe through its last one. `kfType == 0` filler keys
+   *   extend the hold of the nearest preceding real (or interpolation-destination) key; past the
+   *   last key the layer hides.
+   * - A `kfType == 0` key right after an eased (`easeType != 0`) key is that segment's
+   *   interpolation destination: its values hold (with the eased source's image slot).
+   * - The nested child timeline follows the `(timeMs, childStartMs)` ramp sampled by the keys, so a
+   *   held container keeps playing its content instead of freezing on one offset.
+   * - Layers without any `kfType != 0` key carry no artwork and stay invisible, while parent
+   *   modifiers (`groupRole == 1`) still evaluate their value curve.
+   */
   fun evaluateLayer(layer: AbmotionLayer, timeMs: Float): EvaluatedLayerState {
     val kfs = layer.keyframes
-    // Trim trailing empty pad keyframes that exist after easeType==0 hold keyframes
-    var lastRealIdx = kfs.indexOfLast { it.kfType != 0 || it.easeType != 0 }
-    if (lastRealIdx < 0) lastRealIdx = 0
-    // Include one immediate destination keyframe after an easeType > 0 keyframe (even if its
-    // kfType==0)
-    if (lastRealIdx + 1 < kfs.size && kfs[lastRealIdx].easeType != 0) {
-      lastRealIdx += 1
-    }
-    val activeKfs = kfs.subList(0, (lastRealIdx + 1).coerceAtMost(kfs.size))
-
-    val first = activeKfs.first()
-    if (timeMs < first.timeMs) {
+    if (kfs.isEmpty()) {
       return EvaluatedLayerState(
         layerName = layer.name,
         visible = false,
-        kfType = first.kfType,
-        imageIndex = first.imageIndex,
-        maskIndex = first.maskIndex,
-        childTimeMs = first.childStartMs.toFloat(),
-        x = first.x,
-        y = first.y,
-        scaleXPercent = first.scaleX,
-        scaleYPercent = first.scaleY,
-        zPriority = first.zPriority,
-        angleDeg = first.angleDeg,
-        tintR = first.tintR,
-        tintG = first.tintG,
-        tintB = first.tintB,
+        kfType = 0,
+        imageIndex = 0,
+        maskIndex = 0,
+        childTimeMs = 0f,
+        x = 0f,
+        y = 0f,
+        scaleXPercent = 100f,
+        scaleYPercent = 100f,
+        zPriority = 0,
+        angleDeg = 0f,
+        tintR = 1f,
+        tintG = 1f,
+        tintB = 1f,
         alpha = 0f,
-        blendMode = first.blendMode,
-        pivotX = first.pivotX,
-        pivotY = first.pivotY,
+        blendMode = 0,
+        pivotX = 0f,
+        pivotY = 0f,
       )
     }
+    if (layer.groupRole == 1) {
+      return evaluateModifierCurve(layer, kfs, timeMs)
+    }
+    val firstReal = kfs.firstOrNull { it.kfType != 0 } ?: return hiddenState(layer, kfs.first())
+    if (timeMs < firstReal.timeMs || timeMs > kfs.last().timeMs) {
+      return hiddenState(layer, firstReal)
+    }
 
-    // Find current keyframe segment
+    // Current segment over the full key list (filler keys included).
     var idx = 0
-    while (idx + 1 < activeKfs.size && timeMs >= activeKfs[idx + 1].timeMs) {
+    while (idx + 1 < kfs.size && timeMs >= kfs[idx + 1].timeMs) {
       idx++
     }
+    val childTimeMs = childTimeOnRamp(kfs, timeMs)
+    val k0 = kfs[idx]
 
-    val k0 = activeKfs[idx]
-    if (idx + 1 >= activeKfs.size || k0.easeType == 0) {
-      // Hold at k0 (unless k0 itself is a pure terminator with kfType==0 and preceding key had
-      // ease==0)
-      return EvaluatedLayerState(
-        layerName = layer.name,
-        visible = k0.alpha > 0.001f,
-        kfType = k0.kfType,
-        imageIndex = k0.imageIndex,
-        maskIndex = k0.maskIndex,
-        childTimeMs = k0.childStartMs.toFloat(),
-        x = k0.x,
-        y = k0.y,
-        scaleXPercent = k0.scaleX,
-        scaleYPercent = k0.scaleY,
-        zPriority = k0.zPriority,
-        angleDeg = k0.angleDeg,
-        tintR = k0.tintR,
-        tintG = k0.tintG,
-        tintB = k0.tintB,
-        alpha = k0.alpha,
-        blendMode = k0.blendMode,
-        pivotX = k0.pivotX,
-        pivotY = k0.pivotY,
+    // Eased segment: interpolate into the next key, which may itself be kfType == 0. The source
+    // may even be kfType == 0 (Scene02 exit keys carry easeType != 0 with image and values).
+    if (k0.easeType != 0 && idx + 1 < kfs.size) {
+      return interpolateState(layer, k0, kfs[idx + 1], timeMs, childTimeMs)
+    }
+    // Held real key: values freeze while the nested child timeline keeps playing.
+    if (k0.kfType != 0) {
+      return holdState(layer, k0, childTimeMs)
+    }
+    // Interpolation destination after an eased key: hold its values with the eased source's
+    // image slot (destinations usually carry imageIndex 0).
+    if (idx > 0 && kfs[idx - 1].easeType != 0) {
+      val src = kfs[idx - 1]
+      return holdState(
+        layer,
+        k0,
+        childTimeMs,
+        imageIndex = src.imageIndex,
+        maskIndex = src.maskIndex,
+        kfType = src.kfType,
       )
     }
+    // Filler key: extend the hold of the nearest preceding real (or destination) key.
+    var holdIdx = idx - 1
+    while (holdIdx > 0 && kfs[holdIdx].kfType == 0 && kfs[holdIdx - 1].easeType == 0) {
+      holdIdx--
+    }
+    val held = kfs[holdIdx]
+    if (held.kfType == 0 && (holdIdx == 0 || kfs[holdIdx - 1].easeType == 0)) {
+      return hiddenState(layer, firstReal)
+    }
+    if (held.kfType != 0) {
+      return holdState(layer, held, childTimeMs)
+    }
+    val src = kfs[holdIdx - 1]
+    return holdState(
+      layer,
+      held,
+      childTimeMs,
+      imageIndex = src.imageIndex,
+      maskIndex = src.maskIndex,
+      kfType = src.kfType,
+    )
+  }
 
-    val k1 = activeKfs[idx + 1]
+  /**
+   * Evaluates a parent modifier (`groupRole == 1`) as a pure value curve over the full key list.
+   * Modifiers carry no artwork of their own (their keys are usually all `kfType == 0`), so the
+   * result is never visible; [evaluateTrack] still consumes its position, scale, alpha, and child
+   * time for the following `groupRole == 2` layer. Unlike artwork (which holds its pose on
+   * `easeType == 0`), a value curve always interpolates — like [childTimeOnRamp] — so the calendar
+   * photo card fades in instead of popping.
+   */
+  private fun evaluateModifierCurve(
+    layer: AbmotionLayer,
+    kfs: List<AbLayerKeyframe>,
+    timeMs: Float,
+  ): EvaluatedLayerState {
+    val first = kfs.first()
+    val childTimeMs = childTimeOnRamp(kfs, timeMs)
+    if (timeMs < first.timeMs) {
+      return holdState(layer, first, childTimeMs).copy(visible = false)
+    }
+    var idx = 0
+    while (idx + 1 < kfs.size && timeMs >= kfs[idx + 1].timeMs) {
+      idx++
+    }
+    val k0 = kfs[idx]
+    if (idx + 1 < kfs.size) {
+      return interpolateState(
+          layer,
+          k0,
+          kfs[idx + 1],
+          timeMs,
+          childTimeMs,
+          forceLinear = k0.easeType == 0,
+        )
+        .copy(visible = false)
+    }
+    return holdState(layer, k0, childTimeMs).copy(visible = false)
+  }
+
+  /**
+   * Nested child timeline position: the piecewise-linear `(timeMs, childStartMs)` ramp sampled by
+   * the real keys and the `childStartMs`-carrying filler keys. Held constant past the last sample
+   * (a filler pad with `childStartMs == 0` is not a sample, so trailing pads never rewind the
+   * child). All-`childStartMs == 0` layers (particles, plain art) map to a constant `0`.
+   */
+  private fun childTimeOnRamp(kfs: List<AbLayerKeyframe>, timeMs: Float): Float {
+    var prevT = 0
+    var prevCs = 0
+    var havePrev = false
+    for (kf in kfs) {
+      if (kf.kfType == 0 && kf.childStartMs == 0) continue
+      if (timeMs < kf.timeMs) {
+        if (!havePrev) return kf.childStartMs.toFloat()
+        val span = (kf.timeMs - prevT).toFloat()
+        if (span <= 0.001f) return kf.childStartMs.toFloat()
+        return prevCs + (kf.childStartMs - prevCs) * ((timeMs - prevT) / span)
+      }
+      prevT = kf.timeMs
+      prevCs = kf.childStartMs
+      havePrev = true
+    }
+    return if (havePrev) prevCs.toFloat() else 0f
+  }
+
+  private fun hiddenState(layer: AbmotionLayer, kf: AbLayerKeyframe): EvaluatedLayerState =
+    EvaluatedLayerState(
+      layerName = layer.name,
+      visible = false,
+      kfType = kf.kfType,
+      imageIndex = kf.imageIndex,
+      maskIndex = kf.maskIndex,
+      childTimeMs = kf.childStartMs.toFloat(),
+      x = kf.x,
+      y = kf.y,
+      scaleXPercent = kf.scaleX,
+      scaleYPercent = kf.scaleY,
+      zPriority = kf.zPriority,
+      angleDeg = kf.angleDeg,
+      tintR = kf.tintR,
+      tintG = kf.tintG,
+      tintB = kf.tintB,
+      alpha = 0f,
+      blendMode = kf.blendMode,
+      pivotX = kf.pivotX,
+      pivotY = kf.pivotY,
+    )
+
+  private fun holdState(
+    layer: AbmotionLayer,
+    kf: AbLayerKeyframe,
+    childTimeMs: Float,
+    imageIndex: Int = kf.imageIndex,
+    maskIndex: Int = kf.maskIndex,
+    kfType: Int = kf.kfType,
+  ): EvaluatedLayerState =
+    EvaluatedLayerState(
+      layerName = layer.name,
+      visible = kf.alpha > 0.001f,
+      kfType = kfType,
+      imageIndex = imageIndex,
+      maskIndex = maskIndex,
+      childTimeMs = childTimeMs,
+      x = kf.x,
+      y = kf.y,
+      scaleXPercent = kf.scaleX,
+      scaleYPercent = kf.scaleY,
+      zPriority = kf.zPriority,
+      angleDeg = kf.angleDeg,
+      tintR = kf.tintR,
+      tintG = kf.tintG,
+      tintB = kf.tintB,
+      alpha = kf.alpha,
+      blendMode = kf.blendMode,
+      pivotX = kf.pivotX,
+      pivotY = kf.pivotY,
+    )
+
+  private fun interpolateState(
+    layer: AbmotionLayer,
+    k0: AbLayerKeyframe,
+    k1: AbLayerKeyframe,
+    timeMs: Float,
+    childTimeMs: Float,
+    forceLinear: Boolean = false,
+  ): EvaluatedLayerState {
     val span = (k1.timeMs - k0.timeMs).toFloat()
     val rawT = if (span <= 0.001f) 1f else ((timeMs - k0.timeMs) / span).coerceIn(0f, 1f)
-    val easedT = applyEasing(rawT, k0.easeType, k0.easeParam)
+    val easedT = if (forceLinear) rawT else applyEasing(rawT, k0.easeType, k0.easeParam)
 
     val alpha = lerp(k0.alpha, k1.alpha, easedT)
     return EvaluatedLayerState(
@@ -377,7 +579,7 @@ object AbmotionParser {
       kfType = if (k0.kfType != 0) k0.kfType else k1.kfType,
       imageIndex = k0.imageIndex,
       maskIndex = k0.maskIndex,
-      childTimeMs = lerp(k0.childStartMs.toFloat(), k1.childStartMs.toFloat(), rawT),
+      childTimeMs = childTimeMs,
       x = lerp(k0.x, k1.x, easedT),
       y = lerp(k0.y, k1.y, easedT),
       scaleXPercent = lerp(k0.scaleX, k1.scaleX, easedT),

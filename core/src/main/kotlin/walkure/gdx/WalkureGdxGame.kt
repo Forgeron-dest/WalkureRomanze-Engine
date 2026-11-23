@@ -33,6 +33,7 @@ import ktx.app.KtxApplicationAdapter
 import ktx.app.clearScreen
 import ktx.graphics.use
 import walkure.config.AlbumCgGroup
+import walkure.config.AvgSystemSettings
 import walkure.config.GameDatConfig
 import walkure.config.SystemDatParser
 import walkure.config.SystemMessages
@@ -100,6 +101,7 @@ class WalkureGdxGame(
   private lateinit var sysMessages: SystemMessages
   private lateinit var voiceChannels: List<VoiceActorChannel>
   private lateinit var albumLists: Map<String, List<AlbumCgGroup>>
+  private lateinit var avgSettings: AvgSystemSettings
 
   private lateinit var saveManager: SaveManager
   private lateinit var campaign: CampaignConductor
@@ -162,9 +164,24 @@ class WalkureGdxGame(
   private var activeTransitionMode: Int = 0
   private var activeTransitionFeather: Float = 0.08f
   private var activeTransitionAbmp: QlieGdxTextureLoader.AbmpRuntimeNode? = null
-  private var activeTransitionAbmpTimerSec: Float = 0f
+  /** Per-character film strip substituted for the shared `*Link,0` placeholder of a wfade. */
+  private var activeTransitionLinkedTex: Texture? = null
+  private var prevSpriteTextures: List<RenderedSprite> = emptyList()
+  private var prevOverlayTex: Texture? = null
+  /** Set when a fade arms; the outgoing scene is rendered into [prevSceneFbo] on the next frame. */
+  private var pendingSceneCapture = false
+  /**
+   * The spec instance most recently armed. The VM reports its last fade in every snapshot because
+   * the spec is part of the saved visual state, so identity — not nullness — is what separates a
+   * newly requested transition from the sticky copy that rides along with later lines.
+   */
+  private var lastAppliedTransitionSpec: ScenarioVm.TransitionSpec? = null
+  // --- Temporary instrumentation for the transition performance investigation (EngineTrace) ---
+  private var traceSyncCallCount: Int = 0
+  private var traceTransitionStartNanos: Long = 0L
+  private var traceTransitionFrames: Int = 0
+  private var traceSlowFramesLogged: Int = 0
   private var prevSceneFbo: FrameBuffer? = null
-  private var currSceneFbo: FrameBuffer? = null
 
   // UI Screen transition overlay (fadein01.b / fadeout01.b)
   private var uiOverlayAbmp: QlieGdxTextureLoader.AbmpRuntimeNode? = null
@@ -190,7 +207,6 @@ class WalkureGdxGame(
 
   var showDebugHud: Boolean = initialShowDebugHud
 
-  private var eyeCatchDateText: String? = null
   private var eyeCatchBannerTex: Texture? = null
   private var eyeCatchTimer: Float = 0f
 
@@ -202,29 +218,18 @@ class WalkureGdxGame(
     val xOffset: Float,
   )
 
-  private data class SakuraPetal(
-    var x: Float,
-    var y: Float,
-    var vx: Float,
-    var vy: Float,
-    var rotation: Float,
-    var rotSpeed: Float,
-    var scale: Float,
-    var tex: Texture?,
-  )
-
   private val dateAliasMap = LinkedHashMap<String, DateAliasEntry>()
   private var dayEyeCatchActive: Boolean = false
   private var dayEyeCatchTimer: Float = 0f
-  private val dayEyeCatchTotalSec: Float = 2.8f
+  /** `モーション\日付アイキャッチ.b` — the authentic 7.5 s calendar cut-in. */
+  private var dayEyeCatchAbmp: QlieGdxTextureLoader.AbmpRuntimeNode? = null
+  private var dayEyeCatchTotalSec: Float = 7.5f
   private var dayMonthTex: Texture? = null
   private var dayDigit1Tex: Texture? = null
   private var dayDigit2Tex: Texture? = null
   private var dayWeekdayTex: Texture? = null
   private var dayBlurBgTex: Texture? = null
   private var dayMiniBgTex: Texture? = null
-  private var dayOffsetX: Float = 0f
-  private val daySakuraPetals = ArrayList<SakuraPetal>()
 
   private var activeActionCharKey: String? = null
   private var activeActionName: String? = null
@@ -276,7 +281,6 @@ class WalkureGdxGame(
   private data class TitleButtonAnimState(
     var hoverTimeSec: Float = 0f,
     var isHovered: Boolean = false,
-    var enableTimerSec: Float = 0f,
   )
 
   private val titleButtonAssetsCache = HashMap<String, QlieGdxTextureLoader.LoadedButtonAssets?>()
@@ -300,7 +304,6 @@ class WalkureGdxGame(
     val label: () -> String,
     val bounds: Rectangle,
     val abmpPath: String? = null,
-    val isAnimatedWindowStrip: Boolean = false,
     val isActiveToggle: () -> Boolean = { false },
     val onClick: () -> Unit,
   )
@@ -370,19 +373,40 @@ class WalkureGdxGame(
     updateCameraPan()
   }
 
+  /** Times one startup step and reports it, so the slow part of boot is attributable. */
+  private fun <T> bootStep(label: String, block: () -> T): T {
+    val t0 = walkure.EngineTrace.nowNanos()
+    val result = block()
+    walkure.EngineTrace.log("BOOT $label=${walkure.EngineTrace.msSince(t0)}ms")
+    return result
+  }
+
   override fun create() {
-    gameDat = SystemDatParser.parseGameDat(vfs)
-    sysMessages = SystemDatParser.parseSystemMessages(vfs)
-    voiceChannels = SystemDatParser.parseVoiceChannels(vfs)
-    albumLists = SystemDatParser.parseAlbumLists(vfs)
+    walkure.EngineTrace.log(
+      "BOOT create() entered ${walkure.EngineTrace.msSinceProcessStart()}ms after process start " +
+        "(before this: JVM start + VFS mount) tracing=${walkure.EngineTrace.enabled} " +
+        "slowFrameMs=${walkure.EngineTrace.slowFrameThresholdMs()} (disable with -Dwalkure.trace=off)",
+    )
+    gameDat = bootStep("parseGameDat") { SystemDatParser.parseGameDat(vfs) }
+    sysMessages = bootStep("parseSystemMessages") { SystemDatParser.parseSystemMessages(vfs) }
+    voiceChannels = bootStep("parseVoiceChannels") { SystemDatParser.parseVoiceChannels(vfs) }
+    albumLists = bootStep("parseAlbumLists") { SystemDatParser.parseAlbumLists(vfs) }
+    avgSettings = bootStep("parseAvgSettings") { SystemDatParser.parseAvgSettings(vfs) }
 
     saveManager =
-      SaveManager(vfs.gameDir).apply {
-        codeKeySeed = QlieBufferCipher.parseCodeKey(gameDat.codeKey)
-        loadSystemData()
+      bootStep("SaveManager+loadSystemData") {
+        SaveManager(vfs.gameDir).apply {
+          codeKeySeed = QlieBufferCipher.parseCodeKey(gameDat.codeKey)
+          loadSystemData()
+        }
       }
-    campaign = CampaignConductor(vfs)
+    campaign = bootStep("CampaignConductor") { CampaignConductor(vfs) }
+    val aliasT0 = walkure.EngineTrace.nowNanos()
     aliasResolver = AssetAliasResolver(vfs)
+    walkure.EngineTrace.log(
+      "BOOT AssetAliasResolver init=${walkure.EngineTrace.msSince(aliasT0)}ms " +
+        "(fade alias tables loaded here)",
+    )
 
     camera =
       OrthographicCamera().apply {
@@ -402,6 +426,16 @@ class WalkureGdxGame(
     mosaicShader = TransitionShaders.createMosaicTransitionShader()
     solidBlackTex = createSolidTexture(Color(0.02f, 0.02f, 0.04f, 1f))
     solidWhiteTex = createSolidTexture(Color.WHITE)
+    prevSceneFbo =
+      runCatching {
+        FrameBuffer(
+          Pixmap.Format.RGBA8888,
+          VIRTUAL_WIDTH.toInt(),
+          VIRTUAL_HEIGHT.toInt(),
+          false,
+        )
+      }
+        .getOrNull()
     audioManager =
       QlieAudioManager(vfs).apply {
         bgmVolume = saveManager.bgmVolume
@@ -410,23 +444,26 @@ class WalkureGdxGame(
       }
     videoPlayer = customVideoPlayer ?: OgvVideoPlayer(vfs, audioManager)
 
-    initFonts()
-    initParticles()
-    initDateCalendarAlias()
-    initTitleButtons()
-    initGameplayHudButtons()
-    initInput()
+    bootStep("initFonts") { initFonts() }
+    bootStep("initParticles") { initParticles() }
+    bootStep("initDateCalendarAlias") { initDateCalendarAlias() }
+    bootStep("initTitleButtons") { initTitleButtons() }
+    bootStep("initGameplayHudButtons") { initGameplayHudButtons() }
+    bootStep("initInput") { initInput() }
 
     val defaultEntry =
-      scenarioEntries.firstOrNull {
-        it.path.contains(initialScriptQuery ?: "kyo_001_00.s", ignoreCase = true)
-      } ?: scenarioEntries.first()
+      bootStep("scenarioEntries(${scenarioEntries.size})") {
+        scenarioEntries.firstOrNull {
+          it.path.contains(initialScriptQuery ?: "kyo_001_00.s", ignoreCase = true)
+        } ?: scenarioEntries.first()
+      }
     currentScenarioIndex = scenarioEntries.indexOf(defaultEntry).coerceAtLeast(0)
     vm =
       ScenarioVm(
         ScenarioParser.parse(defaultEntry.path, vfs.readTextShiftJis(defaultEntry.path)),
         aliasResolver,
         branchEvaluator = { branchId -> campaign.evaluateBranch(branchId) },
+        avgSettings = avgSettings,
       )
 
     if (initialScriptQuery != null) {
@@ -762,36 +799,18 @@ class WalkureGdxGame(
     dayDigit2Tex = spec.digit2File?.let { textureLoader.loadTexture(it) }
     dayWeekdayTex = textureLoader.loadTexture(spec.weekdayFile)
 
-    val rnd = java.util.concurrent.ThreadLocalRandom.current().nextInt(4)
+    // The original engine plays `モーション\日付アイキャッチ.b` (25 layers, 7.5 s) and binds the
+    // date images into its `日付/*` layers at runtime; the container ships with placeholder April
+    // art. Draw that timeline instead of hand-composing a strip, substituting the date textures
+    // for the layers whose keyframes are marked type 23.
+    dayEyeCatchAbmp = textureLoader.loadAbmpRuntime("モーション\\日付アイキャッチ.b")
+
+    // The original engine uses a deterministic Mersenne Twister (TMTRandom + RandomTable.dat),
+    // not ThreadLocalRandom. Seed java.util.Random from the date key so the same date always
+    // shows the same calendar background images.
+    val rnd = java.util.Random(dateKey.hashCode().toLong()).nextInt(4)
     dayBlurBgTex = textureLoader.loadTexture("画像\\日付背景b_$rnd.png")
     dayMiniBgTex = textureLoader.loadTexture("画像\\日付背景m_$rnd.png")
-    dayOffsetX = spec.xOffset
-
-    daySakuraPetals.clear()
-    val petalNames =
-      listOf(
-        "CompoTemp_8EB275_hana_hana01",
-        "CompoTemp_8EB275_hana_hana02",
-        "CompoTemp_8EB275_hana_hana03",
-      )
-    val petalTextures = petalNames.mapNotNull {
-      textureLoader.loadAbmpLayerByName("モーション\\日付アイキャッチ.b", it)
-    }
-    for (i in 0 until 8) {
-      val pTex = if (petalTextures.isNotEmpty()) petalTextures[i % petalTextures.size] else null
-      daySakuraPetals.add(
-        SakuraPetal(
-          x = 180f + i * 90f + (Math.random().toFloat() * 40f - 20f),
-          y = 470f + (Math.random().toFloat() * 60f - 30f),
-          vx = 20f + Math.random().toFloat() * 30f,
-          vy = -12f - Math.random().toFloat() * 15f,
-          rotation = Math.random().toFloat() * 360f,
-          rotSpeed = (Math.random().toFloat() - 0.5f) * 120f,
-          scale = 0.7f + Math.random().toFloat() * 0.4f,
-          tex = pTex,
-        ),
-      )
-    }
 
     dayEyeCatchActive = true
     dayEyeCatchTimer = dayEyeCatchTotalSec
@@ -895,7 +914,6 @@ class WalkureGdxGame(
           label = { label },
           bounds = Rectangle(bx, 4f, 72f, 26f),
           abmpPath = path,
-          isAnimatedWindowStrip = true,
           onClick = action,
         ),
       )
@@ -1004,6 +1022,61 @@ class WalkureGdxGame(
   }
 
   /**
+   * True when the image a fade layer binds is the engine's stand-in for the captured game screen.
+   * `avgsystem_fade.s` overwrites those slots with `$$$GameThreadImageZ,1001.bmp` / `999.bmp`, and
+   * the container ships a grey/white test pattern instead. The layer is named `Capture` while the
+   * image behind it is named `Dammy1024`, so the decision has to be made on the image name — other
+   * fade containers (`wfade01a`) bind real art, such as an 800x600 wipe rule, under the same shape.
+   */
+  private fun isScreenPlaceholderImage(
+    node: QlieGdxTextureLoader.AbmpRuntimeNode,
+    imageIndex: Int,
+  ): Boolean {
+    val slot = node.slots.getOrNull(imageIndex) ?: return false
+    val name =
+      listOfNotNull(slot.layer.name, slot.layer.filename).firstOrNull { it.isNotBlank() }
+        ?: return false
+    val isDammy =
+      name.startsWith("Dammy", ignoreCase = true) || name.startsWith("Dummy", ignoreCase = true)
+    val isCapture = name.equals("Capture", ignoreCase = true)
+    // avgsystem_fade.s overwrites placeholder slots with $$$GameThreadImageZ,1001.bmp / 999.bmp
+    val isNumericPlaceholder =
+      name.all { it.isDigit() || it == '.' } && name.contains('.').not() && name.length >= 3
+    return isDammy || isCapture || isNumericPlaceholder
+  }
+
+  /**
+   * Returns the per-character film strip of a `wfade02*` container.
+   *
+   * These containers keep the character's 1112x230 strip in a slot the timeline never references,
+   * while the referenced `*Link,0` slot carries a baked copy of the artist's default strip (which
+   * is Lisa's). Picking the largest unreferenced non-placeholder image restores the right character
+   * instead of drawing Lisa for everyone.
+   */
+  private fun resolveUnreferencedStrip(
+    node: QlieGdxTextureLoader.AbmpRuntimeNode?,
+  ): Texture? {
+    val n = node ?: return null
+    val doc = n.document ?: return null
+    val referenced = HashSet<Int>()
+    for (track in doc.tracks) {
+      for (layer in track.layers) {
+        for (kf in layer.keyframes) referenced.add(kf.imageIndex)
+      }
+    }
+    return n.slots
+      .withIndex()
+      .filter { (i, slot) ->
+        i !in referenced &&
+          slot.texture != null &&
+          slot.childNode == null &&
+          !isScreenPlaceholderImage(n, i)
+      }
+      .mapNotNull { it.value.texture }
+      .maxByOrNull { it.width.toLong() * it.height.toLong() }
+  }
+
+  /**
    * Evaluates an `abdata10..13` timeline [node] at [timeMs] and renders all active layers using
    * QLiE's top-left `(1024x768)` coordinate space, pivots, scales (`100 = 1.0x`), clockwise
    * rotation, tint/alpha, and additive blend mode (`blendMode == 1`).
@@ -1012,12 +1085,16 @@ class WalkureGdxGame(
     node: QlieGdxTextureLoader.AbmpRuntimeNode,
     timeMs: Float,
     trackName: String? = null,
+    trackIndex: Int? = null,
     originX: Float = 0f,
     originY: Float = VIRTUAL_HEIGHT,
     parentScaleX: Float = 1f,
     parentScaleY: Float = 1f,
     alphaMul: Float = 1f,
     skipLayerPredicate: ((AbmotionParser.EvaluatedLayerState) -> Boolean)? = null,
+    textureOverride: ((AbmotionParser.EvaluatedLayerState) -> Texture?)? = null,
+    textureFlipY: Boolean = false,
+    linkedTexture: Texture? = null,
   ) {
     val doc = node.document
     if (doc == null) {
@@ -1033,7 +1110,11 @@ class WalkureGdxGame(
       batch.setColor(1f, 1f, 1f, 1f)
       return
     }
-    val track = trackName?.let { doc.findTrack(it) } ?: doc.defaultTrack() ?: return
+    val track =
+      trackIndex?.let { doc.tracks.getOrNull(it) }
+        ?: trackName?.let { doc.findTrack(it) }
+        ?: doc.defaultTrack()
+        ?: return
     val evaluated = AbmotionParser.evaluateTrack(track, timeMs)
     for (ev in evaluated) {
       if (skipLayerPredicate?.invoke(ev) == true) continue
@@ -1041,10 +1122,34 @@ class WalkureGdxGame(
       val layerAlpha = (ev.alpha * alphaMul).coerceIn(0f, 1f)
       if (layerAlpha <= 0.005f) continue
 
+      // kfType == 1 marks a "fill" layer: it has no artwork of its own — the image slot index is
+      // meaningless (usually 0, which points at an unrelated nested container) — and
+      // scaleX/scaleY are the target size in *pixels*, not a percentage. `FrameUp` is a 1024x110
+      // white bar, `White_Fill` a 1024x200 slab, `Back_White` a full 1024x768 card, `Back` a
+      // 1024x550 backdrop. Dividing those by 100 drew them 10x too large, spilling outside the
+      // frame; this is the intro-overflow bug.
+      val pixelSized = ev.kfType == 1
       val sx = (ev.scaleXPercent / 100f) * parentScaleX
       val sy = (ev.scaleYPercent / 100f) * parentScaleY
 
-      if (slot.childNode != null) {
+      if (!pixelSized && slot.childNode != null) {
+        // kfType == 20 with a nested container is a particle emitter (sakura petals, grass
+        // tufts, sparkles): scatter the child timeline as a deterministic field instead of one
+        // stretched sprite. Plain-image type 20 layers (the calendar `Dot` glow) keep the
+        // single-sprite path below via the leaf branch.
+        if (ev.kfType == 20) {
+          drawParticleField(
+            node = slot.childNode,
+            ev = ev,
+            wallTimeMs = timeMs,
+            originX = originX,
+            originY = originY,
+            parentScaleX = parentScaleX,
+            parentScaleY = parentScaleY,
+            alphaMul = layerAlpha,
+          )
+          continue
+        }
         val childDoc = slot.childNode.document
         val cw = (childDoc?.width?.takeIf { it > 0 } ?: 1024).toFloat()
         val ch = (childDoc?.height?.takeIf { it > 0 } ?: 768).toFloat()
@@ -1060,6 +1165,18 @@ class WalkureGdxGame(
           } else {
             ev.childTimeMs.coerceAtLeast(0f)
           }
+        if (walkure.EngineTrace.nestedTraceEnabled) {
+          val nestedImgs =
+            slot.childNode.container.images
+              .mapIndexed { ii, im ->
+                "$ii=${im.name}(${im.filename.take(8)}) nested=${im.nestedAbmp != null}"
+              }
+              .joinToString(" | ")
+          walkure.EngineTrace.log(
+            "EYECATCH-NESTED layer=\"${slot.layer.name}\" childTime=${childTime.toString().take(6)}ms " +
+              "images=[$nestedImgs]",
+          )
+        }
         drawAbmpNode(
           node = slot.childNode,
           timeMs = childTime,
@@ -1070,15 +1187,32 @@ class WalkureGdxGame(
           parentScaleY = sy,
           alphaMul = layerAlpha,
           skipLayerPredicate = null,
+          linkedTexture = linkedTexture,
         )
       } else {
-        val tex = slot.texture ?: continue
+        // A pixel-sized layer is a solid fill in the layer's tint colour; its image index is
+        // unused. In `Scene01a` the fill `Back` and the art layer `BG01` both name image 0, but
+        // only `BG01` (kfType 4) draws `bg01` — the fill is the white matte behind it. Drawing
+        // the slot's art for these layers stretched captions and the Celia container across the
+        // backdrop, and drew wfade03's Dammy1024 test stripes over half the screen.
+        val fill = if (pixelSized) solidWhiteTex else null
+        // `*Link,0` slots inside a wfade film strip are a placeholder holding a copy of the
+        // artist's default strip (always Lisa's). The real per-character strip is the sibling
+        // image the timeline never references, so substitute it here.
+        val linked =
+          if (linkedTexture != null && slot.layer.name.startsWith("*Link")) linkedTexture else null
+        val tex =
+          if (fill != null) fill
+          else textureOverride?.invoke(ev) ?: linked ?: slot.texture ?: continue
         val tw = tex.width.toFloat()
         val th = tex.height.toFloat()
         val glOriginX = tw * ev.pivotX
         val glOriginY = th * (1f - ev.pivotY)
         val drawX = originX + ev.x * parentScaleX - glOriginX
         val drawY = originY - ev.y * parentScaleY - glOriginY
+        // A pixel-sized (kfType==1) layer gives its final size in pixels, not a percentage.
+        val dsx = if (pixelSized && tw > 0f) (ev.scaleXPercent * parentScaleX) / tw else sx
+        val dsy = if (pixelSized && th > 0f) (ev.scaleYPercent * parentScaleY) / th else sy
 
         if (ev.blendMode == 1) {
           batch.setBlendFunction(GL20.GL_SRC_ALPHA, GL20.GL_ONE)
@@ -1092,15 +1226,15 @@ class WalkureGdxGame(
           glOriginY,
           tw,
           th,
-          sx,
-          sy,
+          dsx,
+          dsy,
           -ev.angleDeg,
           0,
           0,
           tex.width,
           tex.height,
           false,
-          false,
+          textureFlipY,
         )
         if (ev.blendMode == 1) {
           batch.setBlendFunction(GL20.GL_SRC_ALPHA, GL20.GL_ONE_MINUS_SRC_ALPHA)
@@ -1108,6 +1242,47 @@ class WalkureGdxGame(
       }
     }
     batch.setColor(1f, 1f, 1f, 1f)
+  }
+
+  /**
+   * Draws a `kfType == 20` particle emitter as a deterministic field of nested-timeline sprites
+   * (see [AbmotionParser.particleFieldLayout]). The emitter's scale sizes the emission rect, not
+   * the petals, so children keep the ancestors' scale; each petal loops the child timeline with its
+   * own variant track and phase offset. The emitter's own angle is ignored (petals carry their own
+   * rotation inside the nested timeline).
+   */
+  private fun drawParticleField(
+    node: QlieGdxTextureLoader.AbmpRuntimeNode,
+    ev: AbmotionParser.EvaluatedLayerState,
+    wallTimeMs: Float,
+    originX: Float,
+    originY: Float,
+    parentScaleX: Float,
+    parentScaleY: Float,
+    alphaMul: Float,
+  ) {
+    val childDoc = node.document
+    val trackCount = childDoc?.tracks?.size ?: 0
+    val childDur = (childDoc?.durationMs ?: 0).coerceAtLeast(1000)
+    val placements =
+      AbmotionParser.particleFieldLayout(
+        ev,
+        "${ev.layerName}#${ev.imageIndex}",
+        trackCount,
+        childDur,
+      )
+    for (p in placements) {
+      drawAbmpNode(
+        node = node,
+        timeMs = (wallTimeMs + p.timeOffsetMs) % childDur.toFloat(),
+        trackIndex = p.trackIndex,
+        originX = originX + p.x * parentScaleX,
+        originY = originY - p.y * parentScaleY,
+        parentScaleX = parentScaleX,
+        parentScaleY = parentScaleY,
+        alphaMul = alphaMul,
+      )
+    }
   }
 
   private fun enterGameplayWithScript(vfsPath: String, preserveVisualState: Boolean = false) {
@@ -1129,6 +1304,7 @@ class WalkureGdxGame(
           parsed,
           aliasResolver,
           branchEvaluator = { branchId -> campaign.evaluateBranch(branchId) },
+          avgSettings = avgSettings,
         )
       prevBackgroundTex = null
       currentBackgroundTex = null
@@ -1660,6 +1836,10 @@ class WalkureGdxGame(
   }
 
   private fun transitionToCampaignStage(stage: CampaignStage?) {
+    walkure.EngineTrace.log(
+      "RENDER transitionToCampaignStage stage=$stage wasGameplay=${mode == EngineMode.GAMEPLAY} " +
+        "pendingSpec=${walkure.EngineTrace.id(vm.lastTransitionSpec)}",
+    )
     val wasGameplay = (mode == EngineMode.GAMEPLAY)
     when (stage) {
       is CampaignStage.ScenarioFile ->
@@ -1735,59 +1915,175 @@ class WalkureGdxGame(
     saveManager.markLineRead(snap.scriptPath, snap.currentLineNumber)
 
     val transSpec = snap.transitionSpec
-    val transDur = transSpec?.durationSec ?: 0.35f
-    bgFadeSpeed = (1f / transDur).coerceIn(0.4f, 8.0f)
-    transitionDurationSec = transDur
-    transitionProgressSec = 0f
-    isTransitionActive = true
-    activeTransitionMode = transSpec?.mode ?: 0
-    activeTransitionFeather = 0.02f + (transSpec?.feather ?: 3) * 0.025f
-
-    val effName = transSpec?.effectName.orEmpty()
-    activeTransitionAbmp =
-      if (
-        effName.endsWith(".b", ignoreCase = true) ||
-          effName.startsWith("wfade", ignoreCase = true) ||
-          effName.startsWith("motion", ignoreCase = true)
-      ) {
-        textureLoader.loadAbmpRuntime(effName) ?: textureLoader.loadAbmpRuntime("フェード\\$effName.b")
-      } else {
-        null
-      }
-    activeTransitionAbmpTimerSec = 0f
-
-    ruleMaskTex =
-      if (
-        effName.isNotEmpty() &&
-          activeTransitionMode != 2 &&
-          activeTransitionMode != 4 &&
-          !effName.equals("crossfade", ignoreCase = true) &&
-          !effName.equals("fade", ignoreCase = true) &&
-          !effName.equals("cut", ignoreCase = true) &&
-          !effName.equals("colorfade", ignoreCase = true) &&
-          !effName.equals("モザイク", ignoreCase = true)
-      ) {
-        textureLoader.loadTransitionMaskTexture(effName)
-      } else {
-        null
-      }
-
-    if (transSpec != null && transSpec.effectName.startsWith("wfade", ignoreCase = true)) {
-      val charTag =
-        transSpec.effectName
-          .removePrefix("wfade02")
-          .removePrefix("wfade03")
-          .removePrefix("wfade01")
-          .replace("ロング", "long")
-      val eyePngPath = "スクリプト\\eyecatch\\01\\image\\$charTag.png"
-      val wfadeAbmpPath = "フェード\\${transSpec.effectName}.b"
-      eyeCatchBannerTex =
-        textureLoader.loadTexture(eyePngPath)
-          ?: textureLoader.loadLargestAbmpLayerTexture(wfadeAbmpPath)
-      eyeCatchTimer = transSpec.durationSec.coerceIn(1.5f, 3.0f)
-      audioManager.playSe("音楽\\ec1.ogg")
+    val syncT0 = walkure.EngineTrace.nowNanos()
+    traceSyncCallCount++
+    val isNewSpec = transSpec != null && transSpec !== lastAppliedTransitionSpec
+    if (walkure.EngineTrace.enabled) {
+      val priorPct =
+        if (transitionDurationSec > 0f)
+          ((transitionProgressSec / transitionDurationSec) * 100f).toInt()
+        else 100
+      val specTag = if (isNewSpec) "NEW" else "STICKY(repeat of last)"
+      val canReArm = !isTransitionActive || transitionProgressSec >= transitionDurationSec
+      walkure.EngineTrace.log(
+        "RENDER sync#$traceSyncCallCount ${snap.scriptPath}:${snap.currentLineNumber} " +
+          "spec=${walkure.EngineTrace.id(transSpec)} $specTag name=${transSpec?.effectName} " +
+          "mode=${transSpec?.mode} dur=${transSpec?.durationSec} feather=${transSpec?.feather} " +
+          "priorActive=$isTransitionActive atProgress=${priorPct}% " +
+          "canReArm=$canReArm " +
+          "arm=${if (isNewSpec && canReArm) "YES" else "NO - retrigger avoided"}",
+      )
+    }
+    // Keep the previous spec reference when transSpec is null (dialogue lines etc.) so the
+    // sticky comparison in isNewSpec still works. Clearing it here loses the reference and
+    // causes every subsequent ^fdi/^fade to re-arm an in-progress transition, producing black
+    // frames and a stalled wipe under skip mode.
+    if (transSpec != null) {
+      lastAppliedTransitionSpec = transSpec
     }
 
+    // Only a freshly requested fade may re-arm the wipe, and only when no transition is
+    // currently in progress. Everything below used to run on every call, which restarted a
+    // full-screen blend on each click and, under skip mode, left the transition permanently
+    // at progress ~0: the observed black frames with no animation.
+    if (isNewSpec && (!isTransitionActive || transitionProgressSec >= transitionDurationSec)) {
+      val transDur = transSpec.durationSec
+      bgFadeSpeed = (1f / transDur).coerceIn(0.4f, 8.0f)
+      transitionDurationSec = transDur
+      transitionProgressSec = 0f
+      isTransitionActive = true
+      pendingSceneCapture = true
+      traceTransitionStartNanos = walkure.EngineTrace.nowNanos()
+      traceTransitionFrames = 0
+      activeTransitionMode = transSpec.mode
+      activeTransitionFeather = 0.02f + transSpec.feather * 0.025f
+
+      val effName = transSpec.effectName
+      val abmpT0 = walkure.EngineTrace.nowNanos()
+      activeTransitionAbmp =
+        if (
+          effName.endsWith(".b", ignoreCase = true) ||
+            effName.startsWith("wfade", ignoreCase = true) ||
+            effName.startsWith("motion", ignoreCase = true)
+        ) {
+          textureLoader.loadAbmpRuntime(effName)
+            ?: textureLoader.loadAbmpRuntime("フェード\\$effName.b")
+        } else {
+          null
+        }
+      val abmpMs = walkure.EngineTrace.msSince(abmpT0)
+      // Every `wfade02*` container carries the character strip in a slot the timeline never
+      // references, and the referenced `*Link,0` slot holds a copy of Lisa's strip. Pick the
+      // unreferenced 1112x230 layer as the real film strip so each character shows itself.
+      activeTransitionLinkedTex = resolveUnreferencedStrip(activeTransitionAbmp)
+
+      val maskT0 = walkure.EngineTrace.nowNanos()
+      ruleMaskTex =
+        if (
+          effName.isNotEmpty() &&
+            activeTransitionMode != 2 &&
+            activeTransitionMode != 4 &&
+            !effName.equals("crossfade", ignoreCase = true) &&
+            !effName.equals("fade", ignoreCase = true) &&
+            !effName.equals("cut", ignoreCase = true) &&
+            !effName.equals("colorfade", ignoreCase = true) &&
+            !effName.equals("モザイク", ignoreCase = true)
+        ) {
+          textureLoader.loadTransitionMaskTexture(effName)
+        } else {
+          null
+        }
+      val maskMs = walkure.EngineTrace.msSince(maskT0)
+      if (walkure.EngineTrace.enabled) {
+        walkure.EngineTrace.log(
+          "RENDER loads eff=\"$effName\" abmp=${abmpMs}ms(hit=${activeTransitionAbmp != null}) " +
+            "mask=${maskMs}ms(hit=${ruleMaskTex != null})",
+        )
+        // One-shot geometry dump: shows how each eyecatch layer is placed, which is what decides
+        // whether a filmstrip layer is being scrolled or simply painted whole.
+        val abmpNode = activeTransitionAbmp
+        val doc = abmpNode?.document
+        if (doc != null && walkure.EngineTrace.enabled) {
+          val track = doc.defaultTrack()
+          val midMs = (doc.durationMs / 2f).coerceAtLeast(1f)
+          val layers =
+            track
+              ?.let {
+                AbmotionParser.evaluateTrack(it, 0f) + AbmotionParser.evaluateTrack(it, midMs)
+              }
+              .orEmpty()
+          walkure.EngineTrace.log(
+            "EYECATCH durMs=${doc.durationMs} slots=${abmpNode.slots.size} " +
+              "layers(n=${layers.size}) " +
+              layers.joinToString(" | ") { ev ->
+                "${ev.layerName}#img${ev.imageIndex} mask=${ev.maskIndex} z=${ev.zPriority} " +
+                  "pos=${ev.x},${ev.y} sc=${ev.scaleXPercent},${ev.scaleYPercent} a=${ev.alpha}"
+              },
+          )
+          // Keyframes are what decide whether a filmstrip layer selects a cell through a child
+          // clip (childStartMs/childEndMs) or by switching imageIndex; without this the whole strip
+          // gets painted as one texture.
+          track?.layers?.forEachIndexed { li, layer ->
+            val slot = abmpNode.slots.getOrNull(layer.keyframes.firstOrNull()?.imageIndex ?: -1)
+            walkure.EngineTrace.log(
+              "EYECATCH-LAYER[$li] name=\"${layer.name}\" enabled=${layer.enabled} " +
+                "role=${layer.groupRole} kfs=${layer.keyframes.size} " +
+                "childNode=${slot?.childNode != null} " +
+                layer.keyframes.joinToString(" ") { kf ->
+                  "@${kf.timeMs}ms img=${kf.imageIndex} mask=${kf.maskIndex} " +
+                    "pos=${kf.x},${kf.y} sc=${kf.scaleX},${kf.scaleY} a=${kf.alpha} " +
+                    "child=${kf.childStartMs}..${kf.childEndMs} ease=${kf.easeType}"
+                },
+            )
+          }
+          abmpNode.container.images.forEachIndexed { ii, img ->
+            walkure.EngineTrace.log(
+              "EYECATCH-IMG[$ii] name=\"${img.name}\" file=\"${img.filename}\" " +
+                "${img.offsetX},${img.offsetY} nested=${img.nestedAbmp != null}",
+            )
+          }
+        }
+      }
+
+      if (effName.startsWith("wfade", ignoreCase = true)) {
+        val charTag =
+          effName
+            .removePrefix("wfade02")
+            .removePrefix("wfade03")
+            .removePrefix("wfade01")
+            .replace("ロング", "long")
+        val eyePngPath = "スクリプト\\eyecatch\\01\\image\\$charTag.png"
+        val wfadeAbmpPath = "フェード\\${effName}.b"
+        eyeCatchBannerTex =
+          if (activeTransitionAbmp != null) {
+            // The ABMP motion container is the authoritative eyecatch. Loading the flat banner as
+            // well made both draw on top of each other — the "largest layer" of these containers is
+            // the Dammy1024 placeholder, so the placeholder animation appeared over the real one.
+            null
+          } else {
+            textureLoader.loadTexture(eyePngPath)
+              ?: textureLoader.loadLargestAbmpLayerTexture(wfadeAbmpPath)
+          }
+        eyeCatchTimer = transDur.coerceIn(1.5f, 3.0f)
+        audioManager.playSe("音楽\\ec1.ogg")
+      }
+    }
+
+    if (isNewSpec) {
+      // Snapshot the outgoing scene layers so the wipe can fade them out together with the
+      // background. Without this the live sprite set is painted at full opacity over the incoming
+      // scene, which showed two characters at once during eyecatch fades.
+      prevSpriteTextures = activeSpriteTextures
+      prevOverlayTex = overlayBackgroundTex
+      if (walkure.EngineTrace.enabled) {
+        walkure.EngineTrace.log(
+          "RENDER spriteSnapshot prev=[${prevSpriteTextures.joinToString(",") { it.charKey }}] " +
+            "incoming=[${snap.activeSprites.keys.joinToString(",")}]",
+        )
+      }
+    }
+
+    val bgT0 = walkure.EngineTrace.nowNanos()
     val bgSym = snap.backgroundSymbol?.lowercase()
     val outgoingBg =
       currentBackgroundTex
@@ -1836,13 +2132,24 @@ class WalkureGdxGame(
         }
       }
 
+    val bgMs = walkure.EngineTrace.msSince(bgT0)
+    val spriteT0 = walkure.EngineTrace.nowNanos()
     activeSpriteTextures =
       snap.activeSprites.values.mapNotNull { slot ->
         val tex = textureLoader.loadTexture(slot.vfsPath) ?: return@mapNotNull null
         RenderedSprite(charKey = slot.charKey, texture = tex, centerX = slot.centerX.toFloat())
       }
-
+    val spriteMs = walkure.EngineTrace.msSince(spriteT0)
+    val faceT0 = walkure.EngineTrace.nowNanos()
     currentFaceTex = snap.currentFaceVfsPath?.let { textureLoader.loadTexture(it) }
+    val faceMs = walkure.EngineTrace.msSince(faceT0)
+    if (walkure.EngineTrace.enabled) {
+      walkure.EngineTrace.log(
+        "RENDER loads2 bg=${bgMs}ms(swap=${snap.backgroundSymbol}) " +
+          "sprites=${spriteMs}ms(n=${activeSpriteTextures.size}) " +
+          "face=${faceMs}ms(hit=${currentFaceTex != null})",
+      )
+    }
     currentFaceOffsetX = snap.currentFaceOffsetX
 
     if (snap.triggeredActionCharKey != null) {
@@ -1854,6 +2161,7 @@ class WalkureGdxGame(
       screenShakeTimerSec = snap.screenShakeDurationSec
     }
 
+    val audioT0 = walkure.EngineTrace.nowNanos()
     if (snap.currentBgmVfsPath != null) {
       saveManager.markBgmPlayed(snap.currentBgmVfsPath)
     }
@@ -1871,9 +2179,18 @@ class WalkureGdxGame(
     } else {
       audioManager.stopVoice()
     }
+    val audioMs = walkure.EngineTrace.msSince(audioT0)
 
     statusMessage =
       "[${snap.inGameDate}] ${snap.scriptPath.substringAfterLast('\\')} (${snap.instructionPointer}/${vm.currentScript.nodes.size}) | BGM: ${audioManager.activeBgmName() ?: "off"}"
+
+    if (walkure.EngineTrace.enabled) {
+      walkure.EngineTrace.log(
+        "RENDER loads3 audio=${audioMs}ms(bgm=${snap.currentBgmVfsPath} " +
+          "voice=${snap.currentVoiceVfsPath}) " +
+          "syncStateWithVm TOTAL=${walkure.EngineTrace.msSince(syncT0)}ms",
+      )
+    }
   }
 
   private fun isSpeakerVoiceMuted(speaker: String?): Boolean {
@@ -1886,6 +2203,7 @@ class WalkureGdxGame(
   }
 
   override fun render() {
+    val frameT0 = walkure.EngineTrace.nowNanos()
     val dt = Gdx.graphics.deltaTime
     uiAnimTimeSec += dt
     clearScreen(red = 0.04f, green = 0.05f, blue = 0.09f, alpha = 1f)
@@ -1920,6 +2238,26 @@ class WalkureGdxGame(
     if (activeModalPrompt != null) {
       renderModalOverlay()
     }
+
+    traceSlowFrame(frameT0)
+  }
+
+  /** Reports frames that exceed the slow-frame threshold along with the transition state. */
+  private fun traceSlowFrame(frameT0: Long) {
+    if (!walkure.EngineTrace.enabled) return
+    val ms = walkure.EngineTrace.msSince(frameT0)
+    if (ms < walkure.EngineTrace.slowFrameThresholdMs()) return
+    // Cap output so a sustained stall cannot flood the log.
+    if (traceSlowFramesLogged >= 500) return
+    traceSlowFramesLogged++
+    val pct =
+      ((transitionProgressSec / transitionDurationSec.coerceAtLeast(0.0001f)) * 100f).toInt()
+    walkure.EngineTrace.log(
+      "SLOW-FRAME ${ms}ms mode=${mode} transitionActive=${isTransitionActive} " +
+        "prog=${pct}% dur=${transitionDurationSec}s modeId=${activeTransitionMode} " +
+        "mask=${ruleMaskTex != null} abmp=${activeTransitionAbmp != null} " +
+        "bgFadeAlpha=${bgFadeAlpha} sprites=${activeSpriteTextures.size}",
+    )
   }
 
   private fun renderModalOverlay() {
@@ -2230,6 +2568,56 @@ class WalkureGdxGame(
     }
   }
 
+  /**
+   * Draws one scene layer — standing sprites plus the cut-in overlay — at the given opacity, so the
+   * outgoing and incoming scene can crossfade together with the background wipe instead of the live
+   * sprites sitting at full opacity on top of it. Must be called inside an active `batch.use`.
+   */
+  private fun drawSpriteLayer(
+    sprites: List<RenderedSprite>,
+    overlay: Texture?,
+    alpha: Float,
+    shakeX: Float,
+    shakeY: Float,
+  ) {
+    if (alpha <= 0f || (sprites.isEmpty() && overlay == null)) return
+    if (walkure.EngineTrace.enabled && alpha < 1f) {
+      walkure.EngineTrace.log(
+        "RENDER spriteLayer alpha=${alpha.toString().take(4)} " +
+          "chars=[${sprites.joinToString(",") { it.charKey }}]",
+      )
+    }
+    batch.setColor(1f, 1f, 1f, alpha)
+    for (sprite in sprites) {
+      if (sprite.centerX > VIRTUAL_WIDTH) continue
+      val tex = sprite.texture
+      val isActing = actionTimerSec > 0f && sprite.charKey == activeActionCharKey
+      val actOffsetX =
+        if (isActing && activeActionName?.contains("揺") == true) {
+          sin(actionTimerSec * 45f) * 10f
+        } else 0f
+      val actOffsetY =
+        if (isActing && activeActionName?.contains("揺") != true) {
+          kotlin.math.abs(sin(actionTimerSec * 14f)) * 18f
+        } else 0f
+      val drawX = sprite.centerX - tex.width / 2f + shakeX + actOffsetX
+      batch.draw(tex, drawX, shakeY + actOffsetY)
+    }
+
+    // Cut-in or foreground overlay (centered at native size if sub-screen cut-in, or full-screen
+    // if >= 1024x768)
+    if (overlay != null) {
+      if (overlay.width < 1000 || overlay.height < 720) {
+        val ox = (VIRTUAL_WIDTH - overlay.width) / 2f + shakeX
+        val oy = (VIRTUAL_HEIGHT - overlay.height) / 2f + 36f + shakeY
+        batch.draw(overlay, ox, oy)
+      } else {
+        batch.draw(overlay, shakeX, shakeY, VIRTUAL_WIDTH, VIRTUAL_HEIGHT)
+      }
+    }
+    batch.setColor(1f, 1f, 1f, 1f)
+  }
+
   private fun renderGameplayScreen(dt: Float) {
     if (bgFadeAlpha < 1f) {
       bgFadeAlpha = (bgFadeAlpha + dt * bgFadeSpeed).coerceAtMost(1f)
@@ -2238,11 +2626,6 @@ class WalkureGdxGame(
       dayEyeCatchTimer = (dayEyeCatchTimer - dt).coerceAtLeast(0f)
       if (dayEyeCatchTimer <= 0f) {
         dayEyeCatchActive = false
-      }
-      for (p in daySakuraPetals) {
-        p.x += p.vx * dt
-        p.y += p.vy * dt
-        p.rotation += p.rotSpeed * dt
       }
     }
     if (eyeCatchTimer > 0f) {
@@ -2260,6 +2643,28 @@ class WalkureGdxGame(
 
     val shakeX = if (screenShakeTimerSec > 0f) sin(screenShakeTimerSec * 65f) * 8f else 0f
     val shakeY = if (screenShakeTimerSec > 0f) cos(screenShakeTimerSec * 50f) * 6f else 0f
+
+    // Capture the outgoing scene (previous bg + sprites + overlay) into prevSceneFbo so the ABMP
+    // eyecatch can substitute it for the Dammy1024 "Capture" placeholder layer instead of skipping
+    // it. Runs once on the first frame after a fade arms.
+    if (pendingSceneCapture) {
+      pendingSceneCapture = false
+      prevSceneFbo?.let { fbo ->
+        fbo.begin()
+        batch.use {
+          val prevBg = prevBackgroundTex
+          if (prevBg != null) {
+            batch.setColor(1f, 1f, 1f, 1f)
+            batch.draw(prevBg, 0f, 0f, VIRTUAL_WIDTH, VIRTUAL_HEIGHT)
+          } else {
+            Gdx.gl.glClearColor(0f, 0f, 0f, 1f)
+            Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT)
+          }
+          drawSpriteLayer(prevSpriteTextures, prevOverlayTex, 1f, 0f, 0f)
+        }
+        fbo.end()
+      }
+    }
 
     if (!showBacklog && vm.pendingChoices().isEmpty() && !vm.isFinished()) {
       if (isSkipMode) {
@@ -2299,10 +2704,21 @@ class WalkureGdxGame(
     val transAbmp = activeTransitionAbmp
 
     transitionProgressSec += dt
-    activeTransitionAbmpTimerSec += dt
     val progress = (transitionProgressSec / transitionDurationSec).coerceIn(0f, 1f)
+    if (walkure.EngineTrace.enabled && isTransitionActive) {
+      traceTransitionFrames++
+      if (progress >= 1f) {
+        walkure.EngineTrace.log(
+          "RENDER transition END dur=${transitionDurationSec}s " +
+            "actualActiveMs=${walkure.EngineTrace.msSince(traceTransitionStartNanos)} " +
+            "frames=$traceTransitionFrames",
+        )
+        traceTransitionFrames = 0
+      }
+    }
     if (progress >= 1f) {
       isTransitionActive = false
+      pendingSceneCapture = false
     }
 
     if (
@@ -2384,38 +2800,43 @@ class WalkureGdxGame(
     if (isTransitionActive && transAbmp != null) {
       batch.use {
         val durMs = (transAbmp.document?.durationMs ?: 1000).toFloat()
-        drawAbmpNode(transAbmp, (progress * durMs).coerceIn(0f, durMs))
+        // `Dammy1024` / `Dummy*` layers are the engine's stand-ins for the captured game screen
+        // (`avgsystem_fade.s` binds `$$$GameThreadImageZ,1001.bmp` and `999.bmp` into them). Their
+        // embedded bitmap is a grey test pattern, so painting it would cover the scene.
+        drawAbmpNode(
+          node = transAbmp,
+          timeMs = (progress * durMs).coerceIn(0f, durMs),
+          // `wfade01a/b/c` lead with `lscroll`: an 800x600 8-bit greyscale ramp, i.e. a rule-wipe
+          // mask of the same family as `フェード\wind.bmp`, not artwork. Painting it is what put a
+          // black-and-white gradient over half the screen.
+          skipLayerPredicate = { ev ->
+            val slot = transAbmp.slots.getOrNull(ev.imageIndex)
+            slot?.layer?.name?.endsWith("scroll", ignoreCase = true) == true
+          },
+          // Substitute the captured outgoing scene for the Dammy1024 "Capture" placeholder layer
+          // instead of skipping it, so the eyecatch plays over the real previous screen.
+          // FBO textures are bottom-up (LibGDX) so they need vertical flip to match QLiE's
+          // top-down layer coordinates.
+          textureOverride = { ev ->
+            val fbo = prevSceneFbo
+            if (isScreenPlaceholderImage(transAbmp, ev.imageIndex)) fbo?.colorBufferTexture
+            else null
+          },
+          textureFlipY = true,
+          linkedTexture = activeTransitionLinkedTex,
+        )
       }
     }
 
+    // A full-screen eyecatch/motion banner replaces the scene for the whole fade. Painting the live
+    // sprites over it is what showed two characters at the same time.
+    val bannerOwnsScreen = isTransitionActive && transAbmp != null
     batch.use {
-      for (sprite in activeSpriteTextures) {
-        if (sprite.centerX > VIRTUAL_WIDTH) continue
-        val tex = sprite.texture
-        val isActing = actionTimerSec > 0f && sprite.charKey == activeActionCharKey
-        val actOffsetX =
-          if (isActing && activeActionName?.contains("揺") == true) {
-            sin(actionTimerSec * 45f) * 10f
-          } else 0f
-        val actOffsetY =
-          if (isActing && activeActionName?.contains("揺") != true) {
-            kotlin.math.abs(sin(actionTimerSec * 14f)) * 18f
-          } else 0f
-        val drawX = sprite.centerX - tex.width / 2f + shakeX + actOffsetX
-        batch.draw(tex, drawX, shakeY + actOffsetY)
-      }
-
-      // Cut-in or foreground overlay (centered at native size if sub-screen cut-in, or full-screen
-      // if >= 1024x768)
-      val overlay = overlayBackgroundTex
-      if (overlay != null) {
-        if (overlay.width < 1000 || overlay.height < 720) {
-          val ox = (VIRTUAL_WIDTH - overlay.width) / 2f + shakeX
-          val oy = (VIRTUAL_HEIGHT - overlay.height) / 2f + 36f + shakeY
-          batch.draw(overlay, ox, oy)
-        } else {
-          batch.draw(overlay, shakeX, shakeY, VIRTUAL_WIDTH, VIRTUAL_HEIGHT)
-        }
+      if (!bannerOwnsScreen) {
+        val outgoingAlpha = if (isTransitionActive) (1f - progress).coerceIn(0f, 1f) else 0f
+        val incomingAlpha = if (isTransitionActive) progress.coerceIn(0f, 1f) else 1f
+        drawSpriteLayer(prevSpriteTextures, prevOverlayTex, outgoingAlpha, shakeX, shakeY)
+        drawSpriteLayer(activeSpriteTextures, overlayBackgroundTex, incomingAlpha, shakeX, shakeY)
       }
 
       // Drifting sakura petals or rain streaks
@@ -2442,7 +2863,13 @@ class WalkureGdxGame(
       renderDebugSceneBar()
     }
 
-    if (hideMessageWindow && !showBacklog) return
+    if (hideMessageWindow && !showBacklog) {
+      // The calendar cut-in and wfade banner are part of the scene, not the message window, and
+      // the day eyecatch is triggered through `abg` which hides the window. Draw them here and
+      // return, otherwise they never appear.
+      batch.use { renderEyeCatchOverlays() }
+      return
+    }
 
     if (showBacklog) {
       Gdx.gl.glEnable(GL20.GL_BLEND)
@@ -2627,79 +3054,55 @@ class WalkureGdxGame(
       }
 
       // 8. Day transition & calendar eyecatch
-      if (dayEyeCatchActive && dayEyeCatchTimer > 0f) {
-        val elapsed = dayEyeCatchTotalSec - dayEyeCatchTimer
-        val alpha =
-          when {
-            elapsed < 0.5f -> (elapsed / 0.5f).coerceIn(0f, 1f)
-            dayEyeCatchTimer < 0.5f -> (dayEyeCatchTimer / 0.5f).coerceIn(0f, 1f)
-            else -> 1f
-          }
-        val smoothAlpha =
-          (0.5f - 0.5f * kotlin.math.cos(alpha * Math.PI.toFloat())).coerceIn(0f, 1f)
-
-        batch.setColor(1f, 1f, 1f, smoothAlpha)
-
-        dayBlurBgTex?.let { blur ->
-          batch.draw(blur, 0f, 462f, VIRTUAL_WIDTH, 96f)
-        }
-
-        dayMiniBgTex?.let { mini ->
-          batch.draw(mini, 390f + dayOffsetX, 496f, 330f, 24f)
-        }
-
-        for (p in daySakuraPetals) {
-          p.tex?.let { pTex ->
-            batch.draw(
-              pTex,
-              p.x,
-              p.y,
-              pTex.width / 2f,
-              pTex.height / 2f,
-              pTex.width.toFloat(),
-              pTex.height.toFloat(),
-              p.scale,
-              p.scale,
-              p.rotation,
-              0,
-              0,
-              pTex.width,
-              pTex.height,
-              false,
-              false,
-            )
-          }
-        }
-
-        dayWeekdayTex?.let { wTex ->
-          batch.draw(wTex, 441f + dayOffsetX, 491f)
-        }
-        dayMonthTex?.let { mTex ->
-          batch.draw(mTex, 578f + dayOffsetX, 490f)
-        }
-        val d1 = dayDigit1Tex
-        if (d1 != null) {
-          batch.draw(d1, 679f + dayOffsetX, 505f)
-          val d2 = dayDigit2Tex
-          if (d2 != null) {
-            batch.draw(d2, 679f + dayOffsetX + d1.width + 2f, 505f)
-          }
-        }
-
-        batch.setColor(1f, 1f, 1f, 1f)
-      }
-
       // 9. Character eyecatch banner (wfade)
-      if (eyeCatchTimer > 0f) {
-        val alpha = eyeCatchTimer.coerceAtMost(1f)
-        val banner = eyeCatchBannerTex
-        if (banner != null) {
-          batch.setColor(1f, 1f, 1f, alpha)
-          val bx = (VIRTUAL_WIDTH - banner.width) / 2f
-          val by = (VIRTUAL_HEIGHT - banner.height) / 2f
-          batch.draw(banner, bx, by)
-          batch.setColor(1f, 1f, 1f, 1f)
-        }
+      renderEyeCatchOverlays()
+    }
+  }
+
+  /**
+   * Draws the calendar cut-in and the wfade character banner.
+   *
+   * Both must render even while the message window is hidden: `@@!EyeCatchDay` invokes
+   * `AVG_BgCommand,abg,...`, and `Avg_mbgExcute` forces `Window=2`, which sets `hideMessageWindow`.
+   * Drawing them after the message-window block meant the calendar was never visible.
+   */
+  private fun renderEyeCatchOverlays() {
+    if (dayEyeCatchActive && dayEyeCatchTimer > 0f) {
+      val elapsed = dayEyeCatchTotalSec - dayEyeCatchTimer
+      val abmp = dayEyeCatchAbmp
+      if (abmp?.document != null) {
+        // Play the authentic 7.5 s timeline. The container is authored with April/Tuesday
+        // placeholders; `@@!EyeCatchDay` passes the real art to `abg` as image files, so the
+        // slot mapping below is what the engine binds at runtime:
+        //   img0 = 日付背景m_N (mini card bg)   img1 = 日付背景b_N (blurred bg)
+        //   img2 = month   img3 = day tens   img4 = day ones   img5 = weekday
+        drawAbmpNode(
+          node = abmp,
+          timeMs = (elapsed * 1000f).coerceIn(0f, abmp.document.durationMs.toFloat()),
+          textureOverride = { ev ->
+            when (ev.imageIndex) {
+              0 -> dayMiniBgTex
+              1 -> dayBlurBgTex
+              2 -> dayMonthTex
+              3 -> dayDigit1Tex
+              4 -> dayDigit2Tex
+              5 -> dayWeekdayTex
+              else -> null
+            }
+          },
+        )
+      }
+    }
+
+    if (eyeCatchTimer > 0f) {
+      val alpha = eyeCatchTimer.coerceAtMost(1f)
+      val banner = eyeCatchBannerTex
+      if (banner != null) {
+        batch.setColor(1f, 1f, 1f, alpha)
+        val bx = (VIRTUAL_WIDTH - banner.width) / 2f
+        val by = (VIRTUAL_HEIGHT - banner.height) / 2f
+        batch.draw(banner, bx, by)
+        batch.setColor(1f, 1f, 1f, 1f)
       }
     }
   }
@@ -3905,6 +4308,7 @@ class WalkureGdxGame(
     runCatching { mosaicShader?.dispose() }
     runCatching { solidBlackTex?.dispose() }
     runCatching { solidWhiteTex?.dispose() }
+    runCatching { prevSceneFbo?.dispose() }
     slotThumbnailTextures.values.forEach { runCatching { it.dispose() } }
     runCatching { dialogueFont.dispose() }
     runCatching { speakerFont.dispose() }

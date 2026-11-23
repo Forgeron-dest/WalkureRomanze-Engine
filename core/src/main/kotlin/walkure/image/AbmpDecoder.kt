@@ -41,7 +41,7 @@ object AbmpDecoder {
         return ArgbDecoder.decodePixmap(payload)
       }
       if (isDpngData(payload)) {
-        return runCatching { Pixmap(payload, 48, payload.size - 48) }.getOrNull()
+        return DpngDecoder.decodePixmap(payload)
       }
       return runCatching { Pixmap(payload, 0, payload.size) }.getOrNull()
     }
@@ -55,7 +55,18 @@ object AbmpDecoder {
         return ArgbDecoder.decode(payload)
       }
       if (isDpngData(payload)) {
-        return runCatching { ImageIO.read(ByteArrayInputStream(payload, 48, payload.size - 48)) }
+        return runCatching {
+          DpngDecoder.decodePixmap(payload)?.let { pm ->
+            val img = BufferedImage(pm.width, pm.height, BufferedImage.TYPE_INT_ARGB)
+            // Use libGDX drawPixel-free bulk copy via getRGB/setRGB on the RGBA8888 pixmap.
+            for (y in 0 until pm.height) {
+              for (x in 0 until pm.width) {
+                img.setRGB(x, y, pm.getPixel(x, y))
+              }
+            }
+            img
+          }
+        }
           .getOrNull()
       }
       return runCatching { ImageIO.read(ByteArrayInputStream(payload)) }.getOrNull()
