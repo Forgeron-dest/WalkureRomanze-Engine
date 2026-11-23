@@ -364,12 +364,7 @@ class QlieGdxTextureLoader(
     val container: AbmpDecoder.AbmpContainer,
     val document: AbmotionParser.AbdataDocument?,
     val slots: List<AbmpSlot>,
-  ) {
-    fun slotTexture(index: Int): Texture? =
-      slots.getOrNull(index)?.let {
-        it.texture ?: it.childNode?.slots?.firstNotNullOfOrNull { c -> c.texture }
-      }
-  }
+  )
 
   data class LoadedButtonAssets(
     val runtime: AbmpRuntimeNode,
@@ -385,19 +380,6 @@ class QlieGdxTextureLoader(
 
   private val runtimeCache = LinkedHashMap<String, AbmpRuntimeNode>(64, 0.75f, true)
   private val runtimeOwnedTextures = ArrayList<Texture>()
-
-  fun loadAbmpContainer(pathOrQuery: String): AbmpDecoder.AbmpContainer? {
-    val resolvedEntry = vfs.resolveEntry(pathOrQuery)?.second ?: return null
-    runtimeCache[resolvedEntry.normalizedPath]?.let {
-      return it.container
-    }
-    val rawBytes = runCatching { vfs.readBytes(resolvedEntry.path) }.getOrNull() ?: return null
-    if (!AbmpDecoder.isAbmpData(rawBytes)) return null
-    return runCatching { AbmpDecoder.parse(rawBytes) }.getOrNull()
-  }
-
-  fun loadAbdataDocument(pathOrQuery: String): AbmotionParser.AbdataDocument? =
-    loadAbmpRuntime(pathOrQuery)?.document
 
   fun loadAbmpRuntime(pathOrQuery: String): AbmpRuntimeNode? {
     val resolvedEntry = vfs.resolveEntry(pathOrQuery)?.second ?: return null

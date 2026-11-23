@@ -166,7 +166,6 @@ class WalkureGdxGame(
   private var activeTransitionAbmp: QlieGdxTextureLoader.AbmpRuntimeNode? = null
   /** Per-character film strip substituted for the shared `*Link,0` placeholder of a wfade. */
   private var activeTransitionLinkedTex: Texture? = null
-  private var activeTransitionAbmpTimerSec: Float = 0f
   private var prevSpriteTextures: List<RenderedSprite> = emptyList()
   private var prevOverlayTex: Texture? = null
   /** Set when a fade arms; the outgoing scene is rendered into [prevSceneFbo] on the next frame. */
@@ -183,7 +182,6 @@ class WalkureGdxGame(
   private var traceTransitionFrames: Int = 0
   private var traceSlowFramesLogged: Int = 0
   private var prevSceneFbo: FrameBuffer? = null
-  private var currSceneFbo: FrameBuffer? = null
 
   // UI Screen transition overlay (fadein01.b / fadeout01.b)
   private var uiOverlayAbmp: QlieGdxTextureLoader.AbmpRuntimeNode? = null
@@ -209,7 +207,6 @@ class WalkureGdxGame(
 
   var showDebugHud: Boolean = initialShowDebugHud
 
-  private var eyeCatchDateText: String? = null
   private var eyeCatchBannerTex: Texture? = null
   private var eyeCatchTimer: Float = 0f
 
@@ -284,7 +281,6 @@ class WalkureGdxGame(
   private data class TitleButtonAnimState(
     var hoverTimeSec: Float = 0f,
     var isHovered: Boolean = false,
-    var enableTimerSec: Float = 0f,
   )
 
   private val titleButtonAssetsCache = HashMap<String, QlieGdxTextureLoader.LoadedButtonAssets?>()
@@ -308,7 +304,6 @@ class WalkureGdxGame(
     val label: () -> String,
     val bounds: Rectangle,
     val abmpPath: String? = null,
-    val isAnimatedWindowStrip: Boolean = false,
     val isActiveToggle: () -> Boolean = { false },
     val onClick: () -> Unit,
   )
@@ -919,7 +914,6 @@ class WalkureGdxGame(
           label = { label },
           bounds = Rectangle(bx, 4f, 72f, 26f),
           abmpPath = path,
-          isAnimatedWindowStrip = true,
           onClick = action,
         ),
       )
@@ -1978,7 +1972,6 @@ class WalkureGdxGame(
           null
         }
       val abmpMs = walkure.EngineTrace.msSince(abmpT0)
-      activeTransitionAbmpTimerSec = 0f
       // Every `wfade02*` container carries the character strip in a slot the timeline never
       // references, and the referenced `*Link,0` slot holds a copy of Lisa's strip. Pick the
       // unreferenced 1112x230 layer as the real film strip so each character shows itself.
@@ -2711,7 +2704,6 @@ class WalkureGdxGame(
     val transAbmp = activeTransitionAbmp
 
     transitionProgressSec += dt
-    activeTransitionAbmpTimerSec += dt
     val progress = (transitionProgressSec / transitionDurationSec).coerceIn(0f, 1f)
     if (walkure.EngineTrace.enabled && isTransitionActive) {
       traceTransitionFrames++

@@ -41,7 +41,6 @@ object AbmotionParser {
     val alpha: Float,
     val pivotX: Float,
     val pivotY: Float,
-    val isExplicitKey: Boolean,
   )
 
   data class AbmotionLayer(
@@ -293,7 +292,6 @@ object AbmotionParser {
       alpha = alpha,
       pivotX = pivotX,
       pivotY = pivotY,
-      isExplicitKey = kfType != 0,
     )
   }
 

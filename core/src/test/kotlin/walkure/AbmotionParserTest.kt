@@ -1,6 +1,7 @@
 package walkure
 
 import java.io.File
+import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -67,7 +68,6 @@ class AbmotionParserTest {
       alpha = alpha,
       pivotX = pivotX,
       pivotY = pivotY,
-      isExplicitKey = kfType != 0,
     )
 
   private fun layer(
@@ -457,15 +457,159 @@ class AbmotionParserTest {
       assertFalse(walkure.gdx.whitenBlackMaskInPlace(spm))
       assertEquals(before, spm.getPixel(40, 40))
       spm.dispose()
+      // Across all menu buttons, only the shape-only black strips normalize.
+      for (button in titleButtons) {
+        val c = AbmpDecoder.parse(vfs.readBytes("スクリプト\\title\\$button"))
+        val strip = c.allFlattenedImages().first { it.name.contains("comb") }
+        val pm = assertNotNull(strip.decodePixmap(), button)
+        val whitened = walkure.gdx.whitenBlackMaskInPlace(pm)
+        pm.dispose()
+        assertEquals(button == "button_quit.b" || button == "button_cancel.b", whitened, button)
+      }
     }
   }
+
+  @Test
+  fun testButtonIconStripFrameGeometry() {
+    // The renderer plays icon strips as 80x80 frames sized by the nested icon document; every
+    // menu button must satisfy that shape or frames would crop/misalign.
+    val dir = gameDir ?: error("GameData was not found in the current directory or its parents.")
+    com.badlogic.gdx.utils.GdxNativesLoader.load()
+    QlieVirtualFileSystem(dir, HonorificsMode.HON).use { vfs ->
+      for (button in titleButtons) {
+        val c = AbmpDecoder.parse(vfs.readBytes("スクリプト\\title\\$button"))
+        val idx = AbmotionParser.resolveButtonLayerIndices(c)
+        val strip = c.allFlattenedImages().getOrNull(idx.iconStripIndex ?: -1)
+        val pm = assertNotNull(strip?.decodePixmap(), "$button icon strip")
+        assertEquals(80, pm.width, "$button strip width")
+        assertEquals(0, pm.height % 80, "$button strip height ${pm.height}")
+        assertTrue(pm.height / 80 >= 10, "$button strip has too few frames")
+        pm.dispose()
+        val iconChild =
+          c.images.firstOrNull { it.nestedAbmp != null && isIconLayer(it.name) }?.nestedAbmp
+        val abdata = iconChild?.decompressedAbdataBytes
+        val doc = assertNotNull(abdata?.let { AbmotionParser.parseAbdata(it) }, button)
+        assertEquals(80, doc.width, "$button icon doc width")
+        assertEquals(80, doc.height, "$button icon doc height")
+      }
+    }
+  }
+
+  @Test
+  fun testRealTitleChildMapping() {
+    val dir = gameDir ?: error("GameData was not found in the current directory or its parents.")
+    QlieVirtualFileSystem(dir, HonorificsMode.HON).use { vfs ->
+      val container = AbmpDecoder.parse(vfs.readBytes("スクリプト\\title\\back.b"))
+      val doc = assertNotNull(AbmotionParser.parseAbdata(container.decompressedAbdataBytes))
+      val track = assertNotNull(doc.defaultTrack())
+      // Held past their last real key, Scene03 and Logo freeze their child offsets at the title
+      // rest pose (Mio and the logo assembly stay up).
+      val scene03 = track.layers.first { it.name == "Scene03" }
+      assertEquals(3000f, AbmotionParser.evaluateLayer(scene03, 16000f).childTimeMs, 0.01f)
+      val logo = track.layers.first { it.name == "Logo" }
+      assertEquals(2000f, AbmotionParser.evaluateLayer(logo, 16000f).childTimeMs, 0.01f)
+      // No child-time jumps at segment joints.
+      val scene01a = track.layers.first { it.name == "Scene01a" }
+      val before = AbmotionParser.evaluateLayer(scene01a, 1499f).childTimeMs
+      val at = AbmotionParser.evaluateLayer(scene01a, 1500f).childTimeMs
+      assertTrue(abs(at - before) < 2f, "child jump $before -> $at")
+      // Rest-pose layer kinds the renderer branches on.
+      val rest = AbmotionParser.evaluateTrack(track, 16000f)
+      assertEquals(1, rest.first { it.layerName == "White_Fill" }.kfType)
+      assertEquals(20, rest.first { it.layerName == "Particle" }.kfType)
+    }
+  }
+
+  @Test
+  fun testTransitionTimelinesEvaluate() {
+    val dir = gameDir ?: error("GameData was not found in the current directory or its parents.")
+    com.badlogic.gdx.utils.GdxNativesLoader.load()
+    QlieVirtualFileSystem(dir, HonorificsMode.HON).use { vfs ->
+      val fades = vfs.listEntries("フェード\\").filter { it.normalizedPath.endsWith(".b") }
+      assertTrue(fades.size >= 40, "expected the wfade set, got ${fades.size}")
+      for (entry in fades) {
+        val c = AbmpDecoder.parse(vfs.readBytes(entry.path))
+        val doc = assertNotNull(AbmotionParser.parseAbdata(c.decompressedAbdataBytes), entry.path)
+        val track = assertNotNull(doc.defaultTrack(), entry.path)
+        val dur = doc.durationMs.coerceAtLeast(1).toFloat()
+        AbmotionParser.evaluateTrack(track, 0f)
+        val mid = AbmotionParser.evaluateTrack(track, dur / 2f)
+        assertTrue(mid.isNotEmpty(), "${entry.path} shows nothing mid-transition")
+        AbmotionParser.evaluateTrack(track, dur)
+      }
+      // wfade01 rule masks: an `lscroll` layer the renderer skips (wipe mask, not art).
+      for (p in listOf("フェード\\wfade01a.b", "フェード\\wfade01b.b", "フェード\\wfade01c.b")) {
+        val c = AbmpDecoder.parse(vfs.readBytes(p))
+        assertTrue(c.images.any { it.name.endsWith("scroll") }, "$p must carry an lscroll mask")
+      }
+      // wfade02/wfade03 carry the Dammy1024 captured-screen placeholder the renderer substitutes.
+      val wfade23 = fades.filter {
+        it.normalizedPath.contains("wfade02") || it.normalizedPath.contains("wfade03")
+      }
+      assertTrue(wfade23.isNotEmpty())
+      for (entry in wfade23) {
+        val c = AbmpDecoder.parse(vfs.readBytes(entry.path))
+        val hasDammy = c.images.any { it.name.startsWith("Dammy") }
+        assertTrue(hasDammy, "${entry.path} must carry Dammy1024")
+      }
+      // wfade03 layout the eyecatch path relies on, with one particle emitter and an invisible
+      // trailing dummy.
+      val w3 = AbmpDecoder.parse(vfs.readBytes("フェード\\wfade03美桜.b"))
+      val w3doc = assertNotNull(AbmotionParser.parseAbdata(w3.decompressedAbdataBytes))
+      val w3track = assertNotNull(w3doc.defaultTrack())
+      val expectedRoles =
+        listOf(
+          "Capture:0",
+          "Back:0",
+          "Time:1",
+          "Chara(5):2",
+          "Rotate:1",
+          "Circle(3):2",
+          "Particle_Box(2):0",
+          "NoName:0",
+        )
+      assertEquals(expectedRoles, w3track.layers.map { "${it.name}:${it.groupRole}" })
+      assertEquals(1, w3track.layers.count { l -> l.keyframes.any { it.kfType == 20 } })
+      val w3mid = AbmotionParser.evaluateTrack(w3track, 1500f)
+      val strayDummies = w3mid.filter { it.layerName == "NoName" && it.imageIndex == 0 }
+      assertTrue(strayDummies.none { it.x == 0f && it.y == 0f })
+      // Rule-mask bitmaps decode (same decision as the loader, exercised without GL).
+      val masks = vfs.listEntries("フェード\\").filter { it.normalizedPath.endsWith(".bmp") }
+      assertTrue(masks.isNotEmpty(), "expected rule-mask bmps")
+      for (entry in masks) {
+        val bytes = vfs.readBytes(entry.path)
+        val pm =
+          if (AbmpDecoder.isDpngData(bytes)) walkure.image.DpngDecoder.decodePixmap(bytes)
+          else com.badlogic.gdx.graphics.Pixmap(bytes, 0, bytes.size)
+        assertNotNull(pm, entry.path)
+        assertTrue(pm.width > 0 && pm.height > 0, entry.path)
+        pm.dispose()
+      }
+    }
+  }
+
+  private fun isIconLayer(name: String): Boolean =
+    name.contains("icon", ignoreCase = true) || name.contains("comb", ignoreCase = true)
+
+  private val titleButtons =
+    listOf(
+      "button_start.b",
+      "button_load.b",
+      "button_config.b",
+      "button_special.b",
+      "button_quit.b",
+      "button_memory.b",
+      "button_album.b",
+      "button_music.b",
+      "button_cancel.b",
+    )
 
   @Test
   fun testButtonLayerIndicesResolveToDecodableArt() {
     val dir = gameDir ?: error("GameData was not found in the current directory or its parents.")
     com.badlogic.gdx.utils.GdxNativesLoader.load()
     QlieVirtualFileSystem(dir, HonorificsMode.HON).use { vfs ->
-      for (button in listOf("button_start.b", "button_music.b")) {
+      for (button in titleButtons) {
         val container = AbmpDecoder.parse(vfs.readBytes("スクリプト\\title\\$button"))
         val flattened = container.allFlattenedImages()
         val idx = AbmotionParser.resolveButtonLayerIndices(container)
