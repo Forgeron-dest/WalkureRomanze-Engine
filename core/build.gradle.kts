@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "org.walkure"
-version = "1.0.0"
+version = rootProject.version
 
 repositories {
     google()
