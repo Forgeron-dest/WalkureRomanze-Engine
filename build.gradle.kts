@@ -4,7 +4,7 @@ import java.awt.image.BufferedImage
 import javax.imageio.ImageIO
 
 plugins {
-    id("com.android.application") version "9.5.2" apply false
+    id("com.android.application") version "9.5.3" apply false
     id("com.diffplug.spotless") version "8.12.0"
     kotlin("jvm") version "2.4.21" apply false
 }
